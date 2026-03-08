@@ -1,0 +1,548 @@
+import React, { useState, useRef } from "react";
+import { Order, OrderItem, OrderFile, OrderStatus } from "../types";
+import { recalculateOrder } from "../orderUtils";
+import {
+  ArrowLeft,
+  Save,
+  Plus,
+  Trash2,
+  FileSpreadsheet,
+  AlertCircle,
+  Upload,
+  Search,
+  Barcode
+} from "lucide-react";
+import { formatCurrency, parseExcelData } from "../utils";
+import * as XLSX from "xlsx";
+import { mapExcelHeaders } from "../services/gemini";
+
+interface CreateOrderProps {
+  onSave: (order: Order) => Promise<void> | void;
+  onCancel: () => void;
+  userRole?: 'admin' | 'user';
+}
+
+export function CreateOrder({ onSave, onCancel, userRole }: CreateOrderProps) {
+  const [name, setName] = useState("");
+  const [supplier, setSupplier] = useState("");
+  const [customerName, setCustomerName] = useState("");
+  const [items, setItems] = useState<OrderItem[]>([]);
+  const [pasteData, setPasteData] = useState("");
+  const [showPasteArea, setShowPasteArea] = useState(false);
+  const [searchTerm, setSearchTerm] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const filteredItems = items.filter((item) => {
+    if (!searchTerm) return true;
+    const term = searchTerm.toLowerCase();
+    return String(item.name).toLowerCase().includes(term) || 
+           (item.productName && String(item.productName).toLowerCase().includes(term));
+  });
+
+  const [isMapping, setIsMapping] = useState(false);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsMapping(true);
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        const data = evt.target?.result;
+        if (!data) return;
+        
+        const wb = XLSX.read(data, { type: 'array' });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1 }) as any[][];
+        
+        // Try heuristic first
+        let parsedRecords = parseExcelData(jsonData);
+        
+        // If heuristic found very few records or failed, try AI mapping
+        if (parsedRecords.length === 0 && jsonData.length > 0) {
+          const aiResult = await mapExcelHeaders(jsonData);
+          const { colMap, headerIndex } = aiResult;
+          
+          if (colMap.productCode !== -1 && colMap.quantity !== -1 && headerIndex !== -1) {
+            const aiRecords = [];
+            for (let i = headerIndex + 1; i < jsonData.length; i++) {
+              const row = jsonData[i];
+              if (!Array.isArray(row)) continue;
+              
+              const name = String(row[colMap.productCode] || '').trim();
+              if (!name) continue;
+              
+              const productName = colMap.productName !== -1 ? String(row[colMap.productName] || '').trim() : undefined;
+              const qty = parseInt(String(row[colMap.quantity] || '0').replace(/[^0-9.-]/g, ''), 10) || 0;
+              const price = colMap.price !== -1 ? parseFloat(String(row[colMap.price] || '0').replace(/[^0-9.-]/g, '')) || 0 : 0;
+              
+              if (name && qty > 0) {
+                aiRecords.push({ name, productName, qty, price });
+              }
+            }
+            if (aiRecords.length > 0) {
+              parsedRecords = aiRecords;
+            }
+          }
+        }
+        
+        const newItems: OrderItem[] = parsedRecords.map((record) => {
+          return {
+            id: crypto.randomUUID(),
+            name: record.name,
+            productName: record.productName,
+            orderedQty: record.qty,
+            expectedPrice: record.price,
+            receivedQty: 0,
+            actualPrice: record.price,
+            totalReceivedCost: 0,
+          };
+        });
+
+        setItems((prev) => [...prev, ...newItems]);
+      } catch (err) {
+        console.error("Error processing file:", err);
+        alert("Có lỗi khi xử lý file Excel.");
+      } finally {
+        setIsMapping(false);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    
+    if (e.target) {
+      e.target.value = '';
+    }
+  };
+
+  const handleAddItem = () => {
+    setItems([
+      ...items,
+      {
+        id: crypto.randomUUID(),
+        name: "",
+        orderedQty: 1,
+        expectedPrice: 0,
+        receivedQty: 0,
+        actualPrice: 0,
+        totalReceivedCost: 0,
+      },
+    ]);
+  };
+
+  const handleUpdateItem = (id: string, field: keyof OrderItem, value: any) => {
+    setItems(
+      items.map((item) => {
+        if (item.id === id) {
+          return { ...item, [field]: value };
+        }
+        return item;
+      }),
+    );
+  };
+
+  const handleRemoveItem = (id: string) => {
+    setItems(items.filter((item) => item.id !== id));
+  };
+
+  const handleParsePaste = () => {
+    if (!pasteData.trim()) return;
+
+    const rows = pasteData.split("\n");
+    const newItems: OrderItem[] = rows
+      .map((row) => {
+        const cols = row.split("\t");
+        if (cols.length >= 2) {
+          const name = cols[0].trim();
+          let productName = "";
+          let qtyStr = "";
+          let priceStr = "";
+
+          if (cols.length >= 4) {
+            productName = cols[1].trim();
+            qtyStr = cols[2];
+            priceStr = cols[3];
+          } else if (cols.length === 3) {
+            // Assume Code | Name | Qty if the last one is a number, or Code | Qty | Price
+            const val2 = parseFloat(cols[2].replace(/,/g, ""));
+            if (!isNaN(val2) && cols[2].trim() !== "") {
+               // Could be Code | Qty | Price
+               const val1 = parseFloat(cols[1].replace(/,/g, ""));
+               if (!isNaN(val1) && cols[1].trim() !== "") {
+                  qtyStr = cols[1];
+                  priceStr = cols[2];
+               } else {
+                  productName = cols[1].trim();
+                  qtyStr = cols[2];
+               }
+            } else {
+               productName = cols[1].trim();
+               qtyStr = cols[2];
+            }
+          } else {
+            qtyStr = cols[1];
+          }
+
+          const qty = parseInt(qtyStr.replace(/,/g, ""), 10) || 0;
+          const price = priceStr ? parseFloat(priceStr.replace(/,/g, "")) || 0 : 0;
+
+          if (name && qty > 0) {
+            return {
+              id: crypto.randomUUID(),
+              name,
+              productName,
+              orderedQty: qty,
+              expectedPrice: price,
+              receivedQty: 0,
+              actualPrice: price,
+              totalReceivedCost: 0,
+            };
+          }
+        }
+        return null;
+      })
+      .filter(Boolean) as OrderItem[];
+
+    setItems([...items, ...newItems]);
+    setPasteData("");
+    setShowPasteArea(false);
+  };
+
+  const handleSave = async () => {
+    if (!name.trim()) {
+      alert("Vui lòng nhập tên đơn hàng");
+      return;
+    }
+    if (items.length === 0) {
+      alert("Vui lòng thêm ít nhất 1 sản phẩm");
+      return;
+    }
+
+    const initialOrderFile: OrderFile = {
+      id: crypto.randomUUID(),
+      fileName: 'File gốc',
+      importedAt: new Date().toISOString(),
+      records: items.map(item => ({
+        itemId: item.id,
+        name: item.name,
+        productName: item.productName,
+        qty: item.orderedQty,
+        price: item.expectedPrice
+      }))
+    };
+
+    const newOrder: Order = {
+      id: crypto.randomUUID(),
+      name,
+      supplier,
+      customerName: customerName.trim() || "Khách lẻ",
+      date: new Date().toISOString(),
+      items: [],
+      orderFiles: [initialOrderFile],
+      receipts: [],
+      status: OrderStatus.PENDING
+    };
+
+    try {
+      await onSave(recalculateOrder(newOrder));
+    } catch (err) {
+      console.error("Error saving order:", err);
+    }
+  };
+
+  return (
+    <div className="p-8 max-w-5xl mx-auto">
+      <button
+        onClick={onCancel}
+        className="flex items-center gap-2 text-slate-500 hover:text-slate-900 transition-colors mb-6 font-medium"
+      >
+        <ArrowLeft className="w-4 h-4" />
+        Hủy & Quay lại
+      </button>
+
+      <div className="flex justify-between items-center mb-8">
+        <div>
+          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">
+            Tạo Đơn Hàng Mới
+          </h1>
+          <p className="text-slate-500 mt-1">
+            Nhập thông tin đơn hàng và danh sách sản phẩm
+          </p>
+        </div>
+        <button
+          onClick={handleSave}
+          className="bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-2.5 rounded-xl font-medium flex items-center gap-2 transition-all shadow-sm shadow-emerald-600/20"
+        >
+          <Save className="w-5 h-5" />
+          Lưu Đơn Hàng
+        </button>
+      </div>
+
+      {isMapping && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center">
+          <div className="bg-white p-8 rounded-2xl shadow-xl flex flex-col items-center gap-4 max-w-sm text-center">
+            <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+            <h3 className="text-lg font-bold text-slate-900">Đang xử lý dữ liệu AI...</h3>
+            <p className="text-slate-500">Hệ thống đang tự động nhận diện và ghép các cột từ file Excel của bạn.</p>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 mb-8">
+        <h2 className="text-lg font-bold text-slate-800 mb-4">
+          Thông tin chung
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              Tên đơn hàng (Tên List) *
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="VD: Đơn nhập hàng tháng 10"
+              className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+            />
+          </div>
+          {userRole === 'admin' && (
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Khách hàng (Người up list)
+              </label>
+              <input
+                type="text"
+                value={customerName}
+                onChange={(e) => setCustomerName(e.target.value)}
+                placeholder="VD: Khách hàng A"
+                className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+              />
+            </div>
+          )}
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              Nhà cung cấp
+            </label>
+            <input
+              type="text"
+              value={supplier}
+              onChange={(e) => setSupplier(e.target.value)}
+              placeholder="VD: Công ty TNHH ABC"
+              className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between bg-slate-50/50 gap-4">
+          <h2 className="text-lg font-bold text-slate-800">
+            Danh sách sản phẩm ({items.length})
+          </h2>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <button
+              onClick={() => searchInputRef.current?.focus()}
+              className="px-3 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg flex items-center gap-2 text-sm font-medium transition-colors border border-emerald-200"
+              title="Sử dụng súng bắn mã vạch: Tự động thêm hoặc cộng dồn số lượng"
+            >
+              <Barcode className="w-4 h-4" />
+              Chế độ quét mã
+            </button>
+            <div className="relative w-full sm:w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder="Tìm mã hoặc tên sản phẩm..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    if (filteredItems.length === 0 && searchTerm.trim() !== "") {
+                      // Automatically add new item if not found
+                      const newItem: OrderItem = {
+                        id: crypto.randomUUID(),
+                        name: searchTerm.trim(),
+                        productName: "",
+                        orderedQty: 1,
+                        expectedPrice: 0,
+                        receivedQty: 0,
+                        actualPrice: 0,
+                        totalReceivedCost: 0,
+                      };
+                      setItems([...items, newItem]);
+                      setSearchTerm("");
+                    } else if (filteredItems.length === 1) {
+                      // If exactly one item matches, increment quantity
+                      const matchedItem = filteredItems[0];
+                      const updatedItems = items.map(i => 
+                        i.id === matchedItem.id ? { ...i, orderedQty: i.orderedQty + 1 } : i
+                      );
+                      setItems(updatedItems);
+                      setSearchTerm("");
+                    }
+                  }
+                }}
+                className="w-full pl-9 pr-4 py-2 text-sm bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+              />
+            </div>
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              onChange={handleFileUpload} 
+              accept=".xlsx, .xls, .csv" 
+              className="hidden" 
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="px-3 py-2 text-blue-600 bg-blue-50 hover:bg-blue-100 text-sm font-medium rounded-lg flex items-center gap-2 transition-colors"
+            >
+              <Upload className="w-4 h-4" />
+              Import Excel
+            </button>
+            <button
+              onClick={() => setShowPasteArea(!showPasteArea)}
+              className="px-3 py-2 text-emerald-600 bg-emerald-50 hover:bg-emerald-100 text-sm font-medium rounded-lg flex items-center gap-2 transition-colors"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              Paste từ Excel
+            </button>
+            <button
+              onClick={handleAddItem}
+              className="px-3 py-2 text-slate-700 bg-slate-100 hover:bg-slate-200 text-sm font-medium rounded-lg flex items-center gap-2 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              Thêm thủ công
+            </button>
+          </div>
+        </div>
+
+        {showPasteArea && (
+          <div className="p-6 bg-slate-50 border-b border-slate-100">
+            <div className="flex items-start gap-3 mb-3">
+              <AlertCircle className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
+              <div className="text-sm text-slate-600">
+                <p className="font-medium text-slate-800 mb-1">
+                  Hướng dẫn dán dữ liệu từ Excel/Google Sheets:
+                </p>
+                <p>
+                  Copy các cột theo thứ tự: <strong>Mã sản phẩm</strong> |{" "}
+                  <strong>Tên sản phẩm (tùy chọn)</strong> |{" "}
+                  <strong>Số lượng</strong> |{" "}
+                  <strong>Giá dự kiến (tùy chọn)</strong>
+                </p>
+              </div>
+            </div>
+            <textarea
+              value={pasteData}
+              onChange={(e) => setPasteData(e.target.value)}
+              placeholder="Dán dữ liệu vào đây..."
+              className="w-full h-32 p-4 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 mb-3"
+            />
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowPasteArea(false)}
+                className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={handleParsePaste}
+                className="px-4 py-2 bg-slate-800 text-white font-medium hover:bg-slate-900 rounded-lg transition-colors"
+              >
+                Xử lý dữ liệu
+              </button>
+            </div>
+          </div>
+        )}
+
+        {items.length === 0 && !showPasteArea ? (
+          <div className="p-12 text-center text-slate-500">
+            Chưa có sản phẩm nào. Hãy thêm thủ công hoặc paste từ Excel.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-xs uppercase tracking-wider font-semibold">
+                  <th className="px-6 py-4 w-1/3">Mã sản phẩm</th>
+                  <th className="px-6 py-4 w-1/3">Tên sản phẩm</th>
+                  <th className="px-6 py-4 w-1/6">Số lượng đặt</th>
+                  <th className="px-6 py-4 w-1/6">Giá dự kiến (VND)</th>
+                  <th className="px-6 py-4 w-16"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredItems.map((item, index) => (
+                  <tr
+                    key={item.id}
+                    className="hover:bg-slate-50/50 transition-colors"
+                  >
+                    <td className="px-6 py-3">
+                      <input
+                        type="text"
+                        value={item.name}
+                        onChange={(e) =>
+                          handleUpdateItem(item.id, "name", e.target.value)
+                        }
+                        placeholder="Nhập mã SP..."
+                        className="w-full px-3 py-1.5 border border-transparent hover:border-slate-200 focus:border-emerald-500 rounded focus:outline-none focus:ring-1 focus:ring-emerald-500 bg-transparent transition-all"
+                      />
+                    </td>
+                    <td className="px-6 py-3">
+                      <input
+                        type="text"
+                        value={item.productName || ""}
+                        onChange={(e) =>
+                          handleUpdateItem(item.id, "productName", e.target.value)
+                        }
+                        placeholder="Nhập tên SP..."
+                        className="w-full px-3 py-1.5 border border-transparent hover:border-slate-200 focus:border-emerald-500 rounded focus:outline-none focus:ring-1 focus:ring-emerald-500 bg-transparent transition-all"
+                      />
+                    </td>
+                    <td className="px-6 py-3">
+                      <input
+                        type="number"
+                        value={item.orderedQty || ""}
+                        onChange={(e) =>
+                          handleUpdateItem(
+                            item.id,
+                            "orderedQty",
+                            parseInt(e.target.value) || 0,
+                          )
+                        }
+                        className="w-full px-3 py-1.5 border border-transparent hover:border-slate-200 focus:border-emerald-500 rounded focus:outline-none focus:ring-1 focus:ring-emerald-500 bg-transparent transition-all"
+                      />
+                    </td>
+                    <td className="px-6 py-3">
+                      <input
+                        type="number"
+                        value={item.expectedPrice || ""}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value) || 0;
+                          handleUpdateItem(item.id, "expectedPrice", val);
+                          handleUpdateItem(item.id, "actualPrice", val); // Sync actual price initially
+                        }}
+                        className="w-full px-3 py-1.5 border border-transparent hover:border-slate-200 focus:border-emerald-500 rounded focus:outline-none focus:ring-1 focus:ring-emerald-500 bg-transparent transition-all"
+                      />
+                    </td>
+                    <td className="px-6 py-3 text-center">
+                      <button
+                        onClick={() => handleRemoveItem(item.id)}
+                        className="p-1.5 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

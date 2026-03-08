@@ -1,0 +1,5 @@
+{
+  "name": "Quản lý Nhập hàng",
+  "description": "Công cụ theo dõi tiến độ nhập hàng, kiểm soát số lượng hàng về thiếu và cảnh báo chênh lệch giá.",
+  "requestFramePermissions": []
+}
