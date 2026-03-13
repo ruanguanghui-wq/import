@@ -7,8 +7,19 @@ import path from "path";
 import { fileURLToPath } from "url";
 import crypto, { randomUUID } from "crypto";
 import dotenv from "dotenv";
+import admin from "firebase-admin";
 
 dotenv.config();
+
+// Initialize Firebase Admin
+if (!admin.apps.length) {
+  try {
+    admin.initializeApp();
+    console.log("Firebase Admin initialized");
+  } catch (err) {
+    console.warn("Firebase Admin failed to initialize with defaults. Some auth features may be limited.", err);
+  }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,7 +47,8 @@ db.exec(`
     id TEXT PRIMARY KEY,
     username TEXT UNIQUE,
     password TEXT,
-    role TEXT
+    role TEXT,
+    email TEXT UNIQUE
   );
 
   CREATE TABLE IF NOT EXISTS orders (
@@ -45,17 +57,30 @@ db.exec(`
     data TEXT,
     FOREIGN KEY(userId) REFERENCES users(id)
   );
+
+  CREATE TABLE IF NOT EXISTS quotations (
+    id TEXT PRIMARY KEY,
+    userId TEXT,
+    data TEXT,
+    FOREIGN KEY(userId) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS products (
+    id TEXT PRIMARY KEY,
+    data TEXT
+  );
 `);
 
 // Create default admin user if not exists
 const adminExists = db.prepare("SELECT * FROM users WHERE username = ?").get("admin");
 if (!adminExists) {
   const hashedPassword = bcrypt.hashSync("admin123", 10);
-  db.prepare("INSERT INTO users (id, username, password, role) VALUES (?, ?, ?, ?)").run(
+  db.prepare("INSERT INTO users (id, username, password, role, email) VALUES (?, ?, ?, ?, ?)").run(
     "admin-id",
     "admin",
     hashedPassword,
-    "admin"
+    "admin",
+    "admin@example.com"
   );
 } else {
   // Ensure admin password is correct
@@ -63,6 +88,13 @@ if (!adminExists) {
 }
 
 // Force admin role for specific users
+db.prepare("INSERT OR IGNORE INTO users (id, username, password, role, email) VALUES (?, ?, ?, ?, ?)").run(
+  "ruan-id",
+  "ruanguanghui@gmail.com",
+  bcrypt.hashSync("admin123", 10),
+  "admin",
+  "ruanguanghui@gmail.com"
+);
 db.prepare("UPDATE users SET role = 'admin' WHERE username = 'ruanguanghui@gmail.com'").run();
 db.prepare("UPDATE users SET role = 'admin' WHERE username = 'admin@example.com'").run();
 
@@ -73,36 +105,58 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
 
   // Auth Middleware
-  const authenticateToken = (req: any, res: any, next: any) => {
+  const authenticateToken = async (req: any, res: any, next: any) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
     if (token == null) return res.sendStatus(401);
 
-    jwt.verify(token, JWT_SECRET, (err: any, decodedUser: any) => {
-      if (err) return res.sendStatus(403);
-      const dbUser = db.prepare("SELECT * FROM users WHERE id = ?").get(decodedUser.id) as any;
-      if (!dbUser) return res.sendStatus(403);
-      req.user = { id: dbUser.id, username: dbUser.username, role: dbUser.role };
-      next();
-    });
+    // Try verifying as Firebase token first
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(token);
+      const email = decodedToken.email;
+      
+      // Sync with local users table
+      let user = db.prepare("SELECT * FROM users WHERE email = ?").get(email) as any;
+      if (!user) {
+        const id = decodedToken.uid;
+        const username = decodedToken.name || email?.split('@')[0] || "User";
+        const role = email === "ruanguanghui@gmail.com" ? "admin" : "user";
+        db.prepare("INSERT INTO users (id, username, role, email) VALUES (?, ?, ?, ?)").run(
+          id, username, role, email
+        );
+        user = { id, username, role, email };
+      }
+      
+      req.user = user;
+      return next();
+    } catch (firebaseErr) {
+      // Fallback to local JWT
+      jwt.verify(token, JWT_SECRET, (err: any, decodedUser: any) => {
+        if (err) return res.sendStatus(403);
+        const dbUser = db.prepare("SELECT * FROM users WHERE id = ?").get(decodedUser.id) as any;
+        if (!dbUser) return res.sendStatus(403);
+        req.user = { id: dbUser.id, username: dbUser.username, role: dbUser.role, email: dbUser.email };
+        next();
+      });
+    }
   };
 
   // Auth Routes
   app.post("/api/auth/login", (req, res) => {
     const { username, password } = req.body;
-    const user = db.prepare("SELECT * FROM users WHERE username = ?").get(username) as any;
+    const user = db.prepare("SELECT * FROM users WHERE username = ? OR email = ?").get(username, username) as any;
 
     if (!user || !bcrypt.compareSync(password, user.password)) {
       return res.status(401).json({ error: "Sai tên đăng nhập hoặc mật khẩu" });
     }
 
-    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET);
-    res.json({ token, user: { id: user.id, username: user.username, role: user.role } });
+    const token = jwt.sign({ id: user.id, username: user.username, role: user.role, email: user.email }, JWT_SECRET);
+    res.json({ token, user: { id: user.id, username: user.username, role: user.role, email: user.email } });
   });
 
   app.post("/api/auth/register", (req, res) => {
-    const { username, password } = req.body;
+    const { username, password, email } = req.body;
     
     if (!username || !password) {
       return res.status(400).json({ error: "Vui lòng nhập đầy đủ thông tin" });
@@ -111,19 +165,21 @@ async function startServer() {
     try {
       const hashedPassword = bcrypt.hashSync(password, 10);
       const id = randomUUID();
-      const role = (username === 'ruanguanghui@gmail.com' || username === 'admin@example.com' || username === 'admin') ? 'admin' : 'user';
-      db.prepare("INSERT INTO users (id, username, password, role) VALUES (?, ?, ?, ?)").run(
+      const userEmail = email || username;
+      const role = (userEmail === 'ruanguanghui@gmail.com' || userEmail === 'admin@example.com' || username === 'admin') ? 'admin' : 'user';
+      db.prepare("INSERT INTO users (id, username, password, role, email) VALUES (?, ?, ?, ?, ?)").run(
         id,
         username,
         hashedPassword,
-        role
+        role,
+        userEmail
       );
       
-      const token = jwt.sign({ id, username, role }, JWT_SECRET);
-      res.json({ token, user: { id, username, role } });
+      const token = jwt.sign({ id, username, role, email: userEmail }, JWT_SECRET);
+      res.json({ token, user: { id, username, role, email: userEmail } });
     } catch (error: any) {
       if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-        return res.status(400).json({ error: "Tên đăng nhập đã tồn tại" });
+        return res.status(400).json({ error: "Tên đăng nhập hoặc email đã tồn tại" });
       }
       res.status(500).json({ error: "Lỗi máy chủ" });
     }
@@ -131,6 +187,60 @@ async function startServer() {
 
   app.get("/api/auth/me", authenticateToken, (req: any, res) => {
     res.json({ user: req.user });
+  });
+
+  // Users Management (Admin only)
+  app.get("/api/users", authenticateToken, (req: any, res) => {
+    if (req.user.role !== 'admin') return res.sendStatus(403);
+    const users = db.prepare("SELECT id, username, email, role FROM users").all();
+    res.json(users);
+  });
+
+  app.post("/api/users", authenticateToken, (req: any, res) => {
+    if (req.user.role !== 'admin') return res.sendStatus(403);
+    const { email, role, username } = req.body;
+    const id = randomUUID();
+    
+    try {
+      db.prepare("INSERT INTO users (id, username, role, email) VALUES (?, ?, ?, ?)").run(
+        id, username || email.split('@')[0], role || 'user', email
+      );
+      res.json({ success: true, id });
+    } catch (error: any) {
+      res.status(400).json({ error: "Email hoặc tên đăng nhập đã tồn tại" });
+    }
+  });
+
+  app.put("/api/users/:id", authenticateToken, (req: any, res) => {
+    if (req.user.role !== 'admin') return res.sendStatus(403);
+    const userId = req.params.id;
+    const { email, role, username } = req.body;
+    
+    try {
+      db.prepare("UPDATE users SET email = ?, role = ?, username = ? WHERE id = ?").run(
+        email, role, username, userId
+      );
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(400).json({ error: "Lỗi khi cập nhật người dùng" });
+    }
+  });
+
+  app.delete("/api/users/:id", authenticateToken, (req: any, res) => {
+    if (req.user.role !== 'admin') return res.sendStatus(403);
+    const userId = req.params.id;
+    if (userId === req.user.id) return res.status(400).json({ error: "Không thể tự xóa chính mình" });
+    
+    db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    res.json({ success: true });
+  });
+
+  app.put("/api/users/:id/role", authenticateToken, (req: any, res) => {
+    if (req.user.role !== 'admin') return res.sendStatus(403);
+    const userId = req.params.id;
+    const { role } = req.body;
+    db.prepare("UPDATE users SET role = ? WHERE id = ?").run(role, userId);
+    res.json({ success: true });
   });
 
   // Orders Routes
@@ -152,11 +262,10 @@ async function startServer() {
     const user = req.user;
     const order = req.body;
     
-    // Ensure the order belongs to the user
     order.userId = user.id;
-    // Set customerName to username if not admin
     if (user.role !== 'admin') {
       order.customerName = user.username;
+      order.customerEmail = user.email;
     }
     
     try {
@@ -186,7 +295,6 @@ async function startServer() {
       return res.status(403).json({ error: "Không có quyền sửa đơn hàng này" });
     }
     
-    // Preserve userId
     updatedOrder.userId = existingOrder.userId;
     
     db.prepare("UPDATE orders SET data = ? WHERE id = ?").run(
@@ -213,6 +321,126 @@ async function startServer() {
     
     db.prepare("DELETE FROM orders WHERE id = ?").run(orderId);
     
+    res.json({ success: true });
+  });
+
+  // Quotations Routes
+  app.get("/api/quotations", authenticateToken, (req: any, res) => {
+    const user = req.user;
+    let quotations;
+    
+    if (user.role === 'admin') {
+      quotations = db.prepare("SELECT data FROM quotations").all();
+    } else {
+      quotations = db.prepare("SELECT data FROM quotations WHERE userId = ?").all(user.id);
+    }
+    
+    const parsedQuotations = quotations.map((q: any) => JSON.parse(q.data));
+    res.json(parsedQuotations);
+  });
+
+  app.post("/api/quotations", authenticateToken, (req: any, res) => {
+    const user = req.user;
+    const quotation = req.body;
+    
+    quotation.userId = user.id;
+    
+    try {
+      db.prepare("INSERT INTO quotations (id, userId, data) VALUES (?, ?, ?)").run(
+        quotation.id,
+        user.id,
+        JSON.stringify(quotation)
+      );
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error inserting quotation:", error);
+      res.status(500).json({ error: "Lỗi khi lưu báo giá" });
+    }
+  });
+
+  app.put("/api/quotations/:id", authenticateToken, (req: any, res) => {
+    const user = req.user;
+    const quotationId = req.params.id;
+    const updatedQuotation = req.body;
+    
+    const existingQuotation = db.prepare("SELECT * FROM quotations WHERE id = ?").get(quotationId) as any;
+    
+    if (!existingQuotation) {
+      return res.status(404).json({ error: "Không tìm thấy báo giá" });
+    }
+    
+    if (user.role !== 'admin' && existingQuotation.userId !== user.id) {
+      return res.status(403).json({ error: "Không có quyền sửa báo giá này" });
+    }
+    
+    updatedQuotation.userId = existingQuotation.userId;
+    
+    db.prepare("UPDATE quotations SET data = ? WHERE id = ?").run(
+      JSON.stringify(updatedQuotation),
+      quotationId
+    );
+    
+    res.json({ success: true });
+  });
+
+  app.delete("/api/quotations/:id", authenticateToken, (req: any, res) => {
+    const user = req.user;
+    const quotationId = req.params.id;
+    
+    const existingQuotation = db.prepare("SELECT * FROM quotations WHERE id = ?").get(quotationId) as any;
+    
+    if (!existingQuotation) {
+      return res.status(404).json({ error: "Không tìm thấy báo giá" });
+    }
+    
+    if (user.role !== 'admin' && existingQuotation.userId !== user.id) {
+      return res.status(403).json({ error: "Không có quyền xóa báo giá này" });
+    }
+    
+    db.prepare("DELETE FROM quotations WHERE id = ?").run(quotationId);
+    
+    res.json({ success: true });
+  });
+
+  // Products Routes
+  app.get("/api/products", authenticateToken, (req: any, res) => {
+    const products = db.prepare("SELECT data FROM products").all();
+    const parsedProducts = products.map((p: any) => JSON.parse(p.data));
+    res.json(parsedProducts);
+  });
+
+  app.post("/api/products", authenticateToken, (req: any, res) => {
+    if (req.user.role !== 'admin') return res.sendStatus(403);
+    const product = req.body;
+    
+    try {
+      db.prepare("INSERT INTO products (id, data) VALUES (?, ?)").run(
+        product.id,
+        JSON.stringify(product)
+      );
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: "Lỗi khi lưu sản phẩm" });
+    }
+  });
+
+  app.put("/api/products/:id", authenticateToken, (req: any, res) => {
+    if (req.user.role !== 'admin') return res.sendStatus(403);
+    const productId = req.params.id;
+    const updatedProduct = req.body;
+    
+    db.prepare("UPDATE products SET data = ? WHERE id = ?").run(
+      JSON.stringify(updatedProduct),
+      productId
+    );
+    
+    res.json({ success: true });
+  });
+
+  app.delete("/api/products/:id", authenticateToken, (req: any, res) => {
+    if (req.user.role !== 'admin') return res.sendStatus(403);
+    const productId = req.params.id;
+    db.prepare("DELETE FROM products WHERE id = ?").run(productId);
     res.json({ success: true });
   });
 
