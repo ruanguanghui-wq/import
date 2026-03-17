@@ -62,6 +62,7 @@ import { ConfirmModal } from "./ConfirmModal";
 
 interface OrderDetailProps {
   order: Order;
+  allOrders?: Order[];
   onUpdate: (order: Order) => Promise<void> | void;
   onBack: () => void;
   products?: Product[];
@@ -70,6 +71,7 @@ interface OrderDetailProps {
 
 export function OrderDetail({
   order: propOrder,
+  allOrders = [],
   onUpdate,
   onBack,
   products = [],
@@ -93,7 +95,15 @@ export function OrderDetail({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [importResult, setImportResult] = useState<{
     matched: number;
-    unmatched: string[];
+    unmatched: { name: string; productName?: string; qty: number; price: number }[];
+    foundInOtherOrders: {
+      name: string;
+      productName?: string;
+      qty: number;
+      price: number;
+      orderId: string;
+      orderName: string;
+    }[];
     overReceived: { name: string; excess: number }[];
   } | null>(null);
   const [isMapping, setIsMapping] = useState(false);
@@ -138,7 +148,7 @@ export function OrderDetail({
       ...order,
       payments: updatedPayments,
     };
-    const finalOrder = recalculateOrder(updatedOrder);
+    const finalOrder = recalculateOrder(updatedOrder, products);
     
     try {
       await updateOrderWithHistory(
@@ -315,15 +325,50 @@ export function OrderDetail({
 
   const confirmDeleteItem = async () => {
     if (!deletingItemId) return;
+    
+    const itemToDelete = order.items.find(i => i.id === deletingItemId);
+    if (!itemToDelete) {
+      setDeletingItemId(null);
+      return;
+    }
+
+    const itemName = itemToDelete.name.toLowerCase();
+
+    // 1. Filter from original items
     const updatedItems = order.items.filter(
       (item) => item.id !== deletingItemId,
     );
-    const finalOrder = recalculateOrder({ ...order, items: updatedItems });
+
+    // 2. Filter from order files
+    const updatedOrderFiles = (order.orderFiles || []).map(file => ({
+      ...file,
+      records: file.records.filter(r => 
+        r.itemId !== deletingItemId && 
+        String(r.name || "").toLowerCase() !== itemName
+      )
+    })).filter(file => file.records.length > 0);
+
+    // 3. Filter from receipts
+    const updatedReceipts = (order.receipts || []).map(receipt => ({
+      ...receipt,
+      records: receipt.records.filter(r => 
+        r.itemId !== deletingItemId && 
+        String(r.name || "").toLowerCase() !== itemName
+      )
+    })).filter(receipt => receipt.records.length > 0);
+
+    const finalOrder = recalculateOrder({ 
+      ...order, 
+      items: updatedItems,
+      orderFiles: updatedOrderFiles,
+      receipts: updatedReceipts
+    }, products);
+
     try {
       await updateOrderWithHistory(
         finalOrder,
         "Xóa sản phẩm",
-        `Đã xóa sản phẩm: ${order.items.find((i) => i.id === deletingItemId)?.name}`,
+        `Đã xóa sản phẩm: ${itemToDelete.name}`,
       );
       setDeletingItemId(null);
     } catch (err) {
@@ -386,7 +431,7 @@ export function OrderDetail({
       return item;
     });
 
-    const finalOrder = recalculateOrder({ ...order, items: updatedItems });
+    const finalOrder = recalculateOrder({ ...order, items: updatedItems }, products);
     try {
       await updateOrderWithHistory(
         finalOrder,
@@ -504,7 +549,7 @@ export function OrderDetail({
       });
       try {
         await updateOrderWithHistory(
-          recalculateOrder({ ...order, items: updatedItems }),
+          recalculateOrder({ ...order, items: updatedItems }, products),
           "Quét mã vạch",
           `Đã quét và cộng 1 cho sản phẩm: ${item.name}`,
         );
@@ -590,13 +635,19 @@ export function OrderDetail({
           }
         }
 
+        const totalKeywords = ["total", "grand total", "tổng cộng", "cộng", "subtotal", "sum"];
+        parsedRecords = parsedRecords.filter((record: any) => {
+          const name = String(record.name || "").toLowerCase();
+          return !totalKeywords.some(keyword => name.includes(keyword));
+        });
+
         if (parsedRecords.length === 0) {
           alert("Lỗi: Không tìm thấy dữ liệu hợp lệ trong file Excel. Vui lòng kiểm tra lại định dạng file, tiêu đề cột hoặc thử lại (có thể do lỗi kết nối AI).");
           return;
         }
 
         let matchedCount = 0;
-        const unmatchedNames: string[] = [];
+        const unmatchedItems: { name: string; productName?: string; qty: number; price: number }[] = [];
         const overReceivedItems: { name: string; excess: number }[] = [];
 
         const records: import("../types").ReceiptRecord[] = [];
@@ -625,17 +676,34 @@ export function OrderDetail({
             );
           });
 
+          let finalProductName = record.productName;
+          const searchKey1 = String(record.name || "").toLowerCase().trim();
+          const searchKey2 = String(record.productName || "").toLowerCase().trim();
+          const matchedProduct = products.find(p => 
+            p.sku.toLowerCase().trim() === searchKey1 || 
+            p.name.toLowerCase().trim() === searchKey1 ||
+            (searchKey2 && (p.sku.toLowerCase().trim() === searchKey2 || p.name.toLowerCase().trim() === searchKey2))
+          );
+          if (matchedProduct) {
+            finalProductName = matchedProduct.name;
+          }
+
           if (item) {
             records.push({
               itemId: item.id,
               name: item.name,
-              productName: record.productName,
+              productName: finalProductName,
               qty: record.qty,
               price: record.price,
             });
             matchedCount++;
           } else {
-            unmatchedNames.push(record.name);
+            unmatchedItems.push({
+              name: record.name,
+              productName: finalProductName,
+              qty: record.qty,
+              price: record.price,
+            });
           }
         });
 
@@ -651,7 +719,7 @@ export function OrderDetail({
           receipts: [...(order.receipts || []), newReceipt],
         };
 
-        const finalOrder = recalculateOrder(updatedOrder);
+        const finalOrder = recalculateOrder(updatedOrder, products);
 
         // Check for over received
         finalOrder.items.forEach((item) => {
@@ -672,9 +740,72 @@ export function OrderDetail({
             "Nhập file Excel",
             `File: ${file.name}\nCập nhật thành công ${matchedCount} sản phẩm.`,
           );
+
+          // Cross-order matching for unmatched items
+          const foundInOtherOrders: {
+            name: string;
+            productName?: string;
+            qty: number;
+            price: number;
+            orderId: string;
+            orderName: string;
+            orderCode?: string;
+          }[] = [];
+          const trulyUnmatched: typeof unmatchedItems = [];
+
+          unmatchedItems.forEach((unmatched) => {
+            const otherOrders = allOrders.filter(
+              (o) =>
+                o.id !== order.id &&
+                (o.status === OrderStatus.PROCESSING ||
+                  o.status === OrderStatus.PARTIAL) &&
+                ((order.type === OrderType.SALES &&
+                  ((order.customerCode && o.customerCode === order.customerCode) ||
+                   (!order.customerCode && o.customerName === order.customerName))) ||
+                  (order.type === OrderType.PURCHASE &&
+                    o.supplier === order.supplier)),
+            );
+
+            let found = false;
+            for (const otherOrder of otherOrders) {
+              const matchingItem = otherOrder.items.find((i) => {
+                const iName = String(i.name || "").toLowerCase().trim();
+                const iProductName = String(i.productName || "")
+                  .toLowerCase()
+                  .trim();
+                const uName = String(unmatched.name || "").toLowerCase().trim();
+                const uProductName = String(unmatched.productName || "")
+                  .toLowerCase()
+                  .trim();
+
+                return (
+                  iName === uName ||
+                  (uProductName && iProductName === uProductName) ||
+                  (uProductName && iName === uProductName) ||
+                  (iProductName && iProductName === uName)
+                );
+              });
+
+              if (matchingItem) {
+                foundInOtherOrders.push({
+                  ...unmatched,
+                  orderId: otherOrder.id,
+                  orderName: otherOrder.name,
+                  orderCode: otherOrder.orderCode,
+                });
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              trulyUnmatched.push(unmatched);
+            }
+          });
+
           setImportResult({
             matched: matchedCount,
-            unmatched: unmatchedNames,
+            unmatched: trulyUnmatched,
+            foundInOtherOrders: foundInOtherOrders,
             overReceived: overReceivedItems,
           });
         } catch (err) {
@@ -692,6 +823,120 @@ export function OrderDetail({
 
     if (e.target) {
       e.target.value = "";
+    }
+  };
+
+  const handleApplyToOtherOrder = async (
+    orderId: string,
+    items: {
+      name: string;
+      productName?: string;
+      qty: number;
+      price: number;
+      orderId: string;
+      orderName: string;
+    }[],
+  ) => {
+    const targetOrder = allOrders.find((o) => o.id === orderId);
+    if (!targetOrder) return;
+
+    const newReceipt: import("../types").Receipt = {
+      id: crypto.randomUUID(),
+      fileName: `Phát sinh từ ${order.name}`,
+      importedAt: new Date().toISOString(),
+      records: items.map((item) => {
+        const matchingItem = targetOrder.items.find((i) => {
+          const iName = String(i.name || "").toLowerCase().trim();
+          const iProductName = String(i.productName || "")
+            .toLowerCase()
+            .trim();
+          const uName = String(item.name || "").toLowerCase().trim();
+          const uProductName = String(item.productName || "")
+            .toLowerCase()
+            .trim();
+          return (
+            iName === uName ||
+            (uProductName && iProductName === uProductName) ||
+            (uProductName && iName === uProductName) ||
+            (iProductName && iProductName === uName)
+          );
+        });
+        return {
+          itemId: matchingItem!.id,
+          name: matchingItem!.name,
+          productName: item.productName,
+          qty: item.qty,
+          price: item.price,
+        };
+      }),
+    };
+
+    const updatedOrder = {
+      ...targetOrder,
+      receipts: [...(targetOrder.receipts || []), newReceipt],
+    };
+
+    const finalOrder = recalculateOrder(updatedOrder, products);
+
+    try {
+      await onUpdate(finalOrder);
+      // Remove these items from importResult
+      if (importResult) {
+        setImportResult({
+          ...importResult,
+          foundInOtherOrders: importResult.foundInOtherOrders.filter(
+            (f) => f.orderId !== orderId,
+          ),
+        });
+      }
+    } catch (err) {
+      console.error("Error applying to other order:", err);
+      alert("Có lỗi khi cập nhật đơn hàng khác.");
+    }
+  };
+
+  const handleAddUnmatchedItems = async () => {
+    if (!importResult || importResult.unmatched.length === 0) return;
+
+    // Latest receipt is the one we just added
+    const latestReceipt = order.receipts?.[order.receipts.length - 1];
+    if (!latestReceipt) return;
+
+    const newRecords = importResult.unmatched.map((unmatched) => ({
+      itemId: crypto.randomUUID(),
+      name: unmatched.name,
+      productName: unmatched.productName,
+      qty: unmatched.qty,
+      price: unmatched.price,
+    }));
+
+    const updatedReceipts = order.receipts!.map((r, idx) => {
+      if (idx === order.receipts!.length - 1) {
+        return {
+          ...r,
+          records: [...r.records, ...newRecords],
+        };
+      }
+      return r;
+    });
+
+    const updatedOrder = {
+      ...order,
+      receipts: updatedReceipts,
+    };
+
+    const finalOrder = recalculateOrder(updatedOrder, products);
+
+    try {
+      await updateOrderWithHistory(
+        finalOrder,
+        "Thêm sản phẩm phát sinh",
+        `Đã thêm ${newRecords.length} sản phẩm phát sinh từ file NCC vào đơn hàng.`
+      );
+      setImportResult(null);
+    } catch (err) {
+      console.error("Error adding unmatched items:", err);
+      alert("Có lỗi khi thêm sản phẩm phát sinh. Vui lòng thử lại.");
     }
   };
 
@@ -764,6 +1009,11 @@ export function OrderDetail({
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight">
               {order.name}
             </h1>
+            {order.orderCode && (
+              <span className="text-xs font-mono bg-slate-100 text-slate-600 px-2 py-1 rounded-md border border-slate-200">
+                Mã ĐH: {order.orderCode}
+              </span>
+            )}
             <select
               value={order.status || OrderStatus.PROCESSING}
               onChange={(e) =>
@@ -839,7 +1089,7 @@ export function OrderDetail({
                           exchangeRate: newRate,
                           items: updatedItems
                         };
-                        await updateOrderWithHistory(recalculateOrder(updatedOrder), "Thay đổi tỷ giá", `Tỷ giá: ${newRate}`);
+                        await updateOrderWithHistory(recalculateOrder(updatedOrder, products), "Thay đổi tỷ giá", `Tỷ giá: ${newRate}`);
                       }}
                       onKeyDown={async (e) => {
                         if (e.key === 'Enter') {
@@ -859,6 +1109,7 @@ export function OrderDetail({
                 Khách hàng:{" "}
                 <strong className="text-slate-700">
                   {order.customerName || "Khách lẻ"}
+                  {order.customerCode && ` (${order.customerCode})`}
                 </strong>
               </span>
             ) : (
@@ -1108,7 +1359,7 @@ export function OrderDetail({
                         });
                         try {
                           await updateOrderWithHistory(
-                            recalculateOrder({ ...order, items: updatedItems }),
+                            recalculateOrder({ ...order, items: updatedItems }, products),
                             "Quét mã vạch (Tìm kiếm)",
                             `Đã quét và cộng 1 cho sản phẩm: ${item.name}`,
                           );
@@ -1155,6 +1406,7 @@ export function OrderDetail({
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-xs uppercase tracking-wider font-semibold">
+                <th className="px-6 py-4 whitespace-nowrap w-16">STT</th>
                 <th className="px-6 py-4 whitespace-nowrap">Mã sản phẩm</th>
                 <th className="px-6 py-4 whitespace-nowrap">Tên sản phẩm</th>
                 <th className="px-6 py-4 text-right whitespace-nowrap">
@@ -1194,7 +1446,7 @@ export function OrderDetail({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {paginatedItems.map((item) => {
+              {paginatedItems.map((item, index) => {
                 const missingQty = Math.max(
                   0,
                   item.orderedQty - item.receivedQty,
@@ -1217,6 +1469,9 @@ export function OrderDetail({
                     key={item.id}
                     className={`transition-colors ${hasWarning ? "bg-rose-50/20 hover:bg-rose-50/40" : "hover:bg-slate-50/50"}`}
                   >
+                    <td className="px-6 py-4 text-sm text-slate-500 font-medium">
+                      {startIndex + index + 1}
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="font-bold text-slate-900">
                         {item.name}
@@ -1849,8 +2104,8 @@ export function OrderDetail({
       {/* Import Result Modal */}
       {importResult && (
         <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
-            <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center shrink-0">
               <h3 className="text-xl font-bold text-slate-900">
                 Kết quả đối chiếu
               </h3>
@@ -1861,7 +2116,7 @@ export function OrderDetail({
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-6 space-y-4">
+            <div className="p-6 space-y-4 overflow-y-auto">
               <div className="flex items-center gap-3 text-emerald-600 bg-emerald-50 p-4 rounded-xl">
                 <CheckCircle className="w-6 h-6" />
                 <div>
@@ -1895,6 +2150,73 @@ export function OrderDetail({
                 </div>
               )}
 
+              {importResult.foundInOtherOrders.length > 0 && (
+                <div className="mt-4">
+                  <div className="flex items-center gap-2 text-indigo-600 mb-2">
+                    <Package className="w-5 h-5" />
+                    <span className="font-bold">
+                      Tìm thấy {importResult.foundInOtherOrders.length} sản phẩm
+                      trong các đơn khác:
+                    </span>
+                  </div>
+                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                    {Object.entries(
+                      importResult.foundInOtherOrders.reduce((acc, item) => {
+                        if (!acc[item.orderId]) {
+                          acc[item.orderId] = {
+                            name: item.orderName,
+                            orderCode: item.orderCode,
+                            items: [],
+                          };
+                        }
+                        acc[item.orderId].items.push(item);
+                        return acc;
+                      }, {} as Record<string, { name: string; orderCode?: string; items: any[] }>),
+                    ).map(([orderId, data]: [string, any]) => (
+                      <div
+                        key={orderId}
+                        className="bg-indigo-50 p-3 rounded-xl border border-indigo-100"
+                      >
+                        <div className="flex justify-between items-center mb-2">
+                          <div className="flex flex-col">
+                            <span className="text-xs font-bold text-indigo-700 uppercase tracking-wider">
+                              {data.name}
+                            </span>
+                            {data.orderCode && (
+                              <span className="text-[10px] text-indigo-500 font-mono mt-0.5">
+                                {data.orderCode}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] bg-indigo-200 text-indigo-800 px-1.5 py-0.5 rounded font-bold">
+                            {data.items.length} SP
+                          </span>
+                        </div>
+                        <ul className="text-xs text-indigo-600 list-disc pl-4 mb-3 space-y-0.5">
+                          {data.items.map((item, idx) => (
+                            <li key={idx}>
+                              {item.name} (SL: {item.qty})
+                            </li>
+                          ))}
+                        </ul>
+                        <button
+                          onClick={() =>
+                            handleApplyToOtherOrder(orderId, data.items)
+                          }
+                          className="w-full py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-bold hover:bg-indigo-700 transition-colors shadow-sm"
+                        >
+                          Cập nhật vào đơn này
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-2 italic">
+                    * Các sản phẩm này thuộc về các đơn hàng khác của cùng khách
+                    hàng/NCC này.
+                  </p>
+                </div>
+              )}
+
               {importResult.unmatched.length > 0 && (
                 <div className="mt-4">
                   <div className="flex items-center gap-2 text-rose-600 mb-2">
@@ -1905,19 +2227,29 @@ export function OrderDetail({
                   </div>
                   <div className="bg-rose-50 p-3 rounded-lg max-h-40 overflow-y-auto text-sm text-rose-700">
                     <ul className="list-disc pl-5 space-y-1">
-                      {importResult.unmatched.map((name, idx) => (
-                        <li key={idx}>{name}</li>
+                      {importResult.unmatched.map((item, idx) => (
+                        <li key={idx}>{item.name}</li>
                       ))}
                     </ul>
                   </div>
-                  <p className="text-xs text-slate-500 mt-2">
+                  <div className="mt-3">
+                    <button
+                      onClick={handleAddUnmatchedItems}
+                      className="w-full py-2 bg-rose-100 text-rose-700 rounded-lg text-sm font-bold hover:bg-rose-200 transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Thêm các sản phẩm này vào đơn hàng
+                    </button>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-2 italic">
                     * Các sản phẩm này có trong file của NCC nhưng không khớp
-                    với tên sản phẩm trong đơn đặt hàng của bạn.
+                    với tên sản phẩm trong đơn đặt hàng của bạn. Bạn có thể thêm
+                    chúng vào đơn hàng như sản phẩm phát sinh.
                   </p>
                 </div>
               )}
             </div>
-            <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+            <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end shrink-0">
               <button
                 onClick={() => setImportResult(null)}
                 className="px-6 py-2 bg-slate-800 text-white font-medium hover:bg-slate-900 rounded-lg transition-colors"
@@ -1991,7 +2323,7 @@ export function OrderDetail({
               ...order,
               payments: updatedPayments,
             };
-            const finalOrder = recalculateOrder(updatedOrder);
+            const finalOrder = recalculateOrder(updatedOrder, products);
             const paymentDetail = payment.foreignAmount 
               ? `${formatForeignCurrency(payment.foreignAmount, payment.currency || "")} (Tỷ giá: ${formatNumber(payment.exchangeRate || 0)}) ~ ${formatCurrency(payment.amount)}`
               : formatCurrency(payment.amount);

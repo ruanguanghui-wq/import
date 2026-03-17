@@ -286,8 +286,8 @@ export function SsoAccountManager() {
       {/* Modal Thêm/Sửa */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between p-6 border-b border-slate-100">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between p-6 border-b border-slate-100 shrink-0">
               <h3 className="text-lg font-bold text-slate-800">
                 {editingUser ? "Sửa tài khoản" : "Thêm tài khoản mới"}
               </h3>
@@ -299,7 +299,7 @@ export function SsoAccountManager() {
               </button>
             </div>
 
-            <form onSubmit={handleSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleSubmit} className="p-6 space-y-4 overflow-y-auto">
               {formError && (
                 <div className="p-3 bg-rose-50 text-rose-600 rounded-xl text-sm font-medium border border-rose-100">
                   {formError}
@@ -367,7 +367,7 @@ export function SsoAccountManager() {
                 </div>
               </div>
 
-              <div className="pt-4 flex gap-3">
+              <div className="pt-4 flex gap-3 shrink-0">
                 <button
                   type="button"
                   onClick={handleCloseModal}

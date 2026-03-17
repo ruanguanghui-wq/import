@@ -1,10 +1,19 @@
-import { Order, OrderItem, PaymentStatus } from "./types";
+import { Order, OrderItem, PaymentStatus, Product } from "./types";
 
-export function recalculateOrder(order: Order): Order {
+export function recalculateOrder(order: Order, products: Product[] = []): Order {
   const orderFiles = order.orderFiles || [];
   const receipts = order.receipts || [];
   const currency = order.currency || "VND";
   const exchangeRate = order.exchangeRate || 1;
+
+  // Create a map for faster lookup (case-insensitive)
+  const productMap = new Map<string, string>();
+  if (products.length > 0) {
+    products.forEach(p => {
+      productMap.set(p.sku.toLowerCase().trim(), p.name);
+      productMap.set(p.name.toLowerCase().trim(), p.name);
+    });
+  }
 
   const existingItemsMap = new Map(
     order.items?.map((i) => [String(i.name).toLowerCase(), i]) || [],
@@ -31,10 +40,22 @@ export function recalculateOrder(order: Order): Order {
         } else {
           const prevItem = existingItemsMap.get(key);
           const vndPrice = currency !== "VND" ? Math.round(record.price * exchangeRate) : record.price;
+          
+          let finalProductName = record.productName || prevItem?.productName;
+          if (products.length > 0) {
+            const searchKey1 = String(record.name || "").toLowerCase().trim();
+            const searchKey2 = String(record.productName || "").toLowerCase().trim();
+            if (productMap.has(searchKey1)) {
+              finalProductName = productMap.get(searchKey1);
+            } else if (searchKey2 && productMap.has(searchKey2)) {
+              finalProductName = productMap.get(searchKey2);
+            }
+          }
+
           itemsMap.set(key, {
             id: prevItem?.id || record.itemId || crypto.randomUUID(),
             name: record.name,
-            productName: record.productName || prevItem?.productName,
+            productName: finalProductName,
             orderedQty: record.qty,
             expectedPrice: vndPrice,
             receivedQty: 0,
@@ -102,10 +123,22 @@ export function recalculateOrder(order: Order): Order {
       } else if (key) {
         const prevItem = existingItemsMap.get(key);
         const vndPrice = currency !== "VND" ? Math.round(record.price * exchangeRate) : record.price;
+        
+        let finalProductName = record.productName || prevItem?.productName;
+        if (products.length > 0) {
+          const searchKey1 = String(record.name || "").toLowerCase().trim();
+          const searchKey2 = String(record.productName || "").toLowerCase().trim();
+          if (productMap.has(searchKey1)) {
+            finalProductName = productMap.get(searchKey1);
+          } else if (searchKey2 && productMap.has(searchKey2)) {
+            finalProductName = productMap.get(searchKey2);
+          }
+        }
+
         const newItem: OrderItem = {
           id: record.itemId || crypto.randomUUID(),
           name: record.name || "Unknown Item",
-          productName: record.productName || prevItem?.productName,
+          productName: finalProductName,
           orderedQty: 0,
           expectedPrice: 0,
           receivedQty: record.qty,

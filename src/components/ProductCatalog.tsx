@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useMemo } from "react";
 import { Product } from "../types";
 import {
   Package,
@@ -22,27 +22,46 @@ import { useAuth } from "../store";
 import * as XLSX from "xlsx";
 import { mapExcelHeaders } from "../services/gemini";
 
+import { AdminDatabase } from "./AdminDatabase";
+import { Order, Quotation } from "../types";
+
 interface ProductCatalogProps {
   products: Product[];
-  onAddProduct: (product: Product) => void;
-  onUpdateProduct: (product: Product) => void;
-  onDeleteProduct: (id: string) => void;
-  onBulkAddProducts: (products: Product[]) => void;
-  onBulkUpdateProducts: (products: Product[]) => void;
-  onBulkDeleteProducts: (ids: string[]) => void;
+  orders: Order[];
+  quotations: Quotation[];
+  onAddProduct: (product: Product) => Promise<void>;
+  onUpdateProduct: (product: Product) => Promise<void>;
+  onDeleteProduct: (id: string) => Promise<void>;
+  onBulkAddProducts: (products: Product[], skipSync?: boolean) => Promise<void>;
+  onBulkUpdateProducts: (products: Product[]) => Promise<void>;
+  onBulkDeleteProducts: (ids: string[]) => Promise<void>;
+  onMergeProducts: (source: Product, target: Product) => Promise<void>;
+  onUpdateOrder: (order: Order) => Promise<void>;
+  onBulkUpdateOrders: (orders: Order[]) => Promise<void>;
+  onSyncAllProducts: (products: Product[]) => Promise<void>;
 }
 
 const ITEMS_PER_PAGE = 50;
 
 export function ProductCatalog({
   products,
+  orders,
+  quotations,
   onAddProduct,
   onUpdateProduct,
   onDeleteProduct,
   onBulkAddProducts,
   onBulkUpdateProducts,
   onBulkDeleteProducts,
+  onMergeProducts,
+  onUpdateOrder,
+  onBulkUpdateOrders,
+  onSyncAllProducts,
 }: ProductCatalogProps) {
+  const [activeTab, setActiveTab] = useState<'standard' | 'custom'>('standard');
+  const [mergingProduct, setMergingProduct] = useState<Product | null>(null);
+  const [mergeTargetId, setMergeTargetId] = useState<string>("");
+  const [isMerging, setIsMerging] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
@@ -55,10 +74,17 @@ export function ProductCatalog({
   const [showBulkCategory, setShowBulkCategory] = useState(false);
   const [bulkCategory, setBulkCategory] = useState("");
   const [confirmDeleteIds, setConfirmDeleteIds] = useState<string[] | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (message: string) => {
+    setToastMessage(message);
+    setTimeout(() => setToastMessage(null), 3000);
+  };
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const [columnOrder, setColumnOrder] = useState<string[]>([
     "selection",
+    "stt",
     "name",
     "sku",
     "unit",
@@ -83,6 +109,51 @@ export function ProductCatalog({
     description: "",
   });
 
+  const unsyncedCount = useMemo(() => {
+    const productMap = new Map<string, Product>();
+    products.forEach(p => {
+      productMap.set(p.sku.toLowerCase().trim(), p);
+      productMap.set(p.name.toLowerCase().trim(), p);
+    });
+
+    const uniqueItems = new Set<string>();
+    orders.forEach(order => {
+      order.items.forEach(item => {
+        const itemName = (item.name || "").trim();
+        const itemProductName = (item.productName || "").trim();
+        
+        const searchKey1 = itemName.toLowerCase();
+        const searchKey2 = itemProductName.toLowerCase();
+        
+        let matchedProduct = productMap.get(searchKey1) || productMap.get(searchKey2);
+        
+        if (!matchedProduct) {
+          const key = searchKey1 || searchKey2;
+          if (key) uniqueItems.add(key);
+        }
+      });
+    });
+
+    quotations.forEach(quotation => {
+      quotation.items.forEach(item => {
+        const itemName = (item.name || "").trim();
+        const itemProductName = (item.productName || "").trim();
+        
+        const searchKey1 = itemName.toLowerCase();
+        const searchKey2 = itemProductName.toLowerCase();
+        
+        let matchedProduct = productMap.get(searchKey1) || productMap.get(searchKey2);
+        
+        if (!matchedProduct) {
+          const key = searchKey1 || searchKey2;
+          if (key) uniqueItems.add(key);
+        }
+      });
+    });
+
+    return uniqueItems.size;
+  }, [orders, quotations, products]);
+
   const filteredProducts = products.filter(
     (p) =>
       p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -98,6 +169,8 @@ export function ProductCatalog({
     startIndex + ITEMS_PER_PAGE,
   );
 
+  const standardProductsCount = products.length;
+
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setSearchTerm(e.target.value);
     setCurrentPage(1);
@@ -105,7 +178,7 @@ export function ProductCatalog({
 
   const handleSave = () => {
     if (!formData.sku || !formData.name) {
-      alert("Vui lòng nhập Mã sản phẩm và Tên sản phẩm");
+      showToast("Vui lòng nhập Mã sản phẩm và Tên sản phẩm");
       return;
     }
 
@@ -164,7 +237,7 @@ export function ProductCatalog({
     setSelectedIds(new Set());
     setBulkCategory("");
     setShowBulkCategory(false);
-    alert(`Đã cập nhật danh mục cho ${productsToUpdate.length} sản phẩm.`);
+    showToast(`Đã cập nhật danh mục cho ${productsToUpdate.length} sản phẩm.`);
   };
 
   const handleBulkDelete = async () => {
@@ -178,12 +251,12 @@ export function ProductCatalog({
       if (confirmDeleteIds.length > 1) {
         await onBulkDeleteProducts(confirmDeleteIds);
         setSelectedIds(new Set());
-        alert("Đã xóa các sản phẩm thành công.");
+        showToast("Đã xóa các sản phẩm thành công.");
       } else {
         await onDeleteProduct(confirmDeleteIds[0]);
       }
     } catch (err) {
-      alert("Có lỗi khi xóa sản phẩm.");
+      showToast("Có lỗi khi xóa sản phẩm.");
     } finally {
       setConfirmDeleteIds(null);
     }
@@ -259,6 +332,19 @@ export function ProductCatalog({
                 className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
               />
             )}
+          </th>
+        );
+      case "stt":
+        return (
+          <th
+            key={col}
+            className={headerClass}
+            draggable
+            onDragStart={(e) => handleColumnDragStart(e, col)}
+            onDragOver={(e) => handleColumnDragOver(e, col)}
+          >
+            {dragIndicator}
+            STT
           </th>
         );
       case "name":
@@ -344,7 +430,7 @@ export function ProductCatalog({
     }
   };
 
-  const renderCell = (col: string, product: Product) => {
+  const renderCell = (col: string, product: Product, index: number) => {
     switch (col) {
       case "selection":
         return (
@@ -357,6 +443,12 @@ export function ProductCatalog({
                 className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
               />
             )}
+          </td>
+        );
+      case "stt":
+        return (
+          <td key={col} className="px-6 py-4 text-sm text-slate-500 font-medium">
+            {startIndex + index + 1}
           </td>
         );
       case "name":
@@ -406,6 +498,13 @@ export function ProductCatalog({
         return isAdmin ? (
           <td key={col} className="px-6 py-4 text-right">
             <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setMergingProduct(product)}
+                className="px-3 py-1.5 bg-indigo-100 text-indigo-700 hover:bg-indigo-200 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
+                title="Gộp vào Hàng Chuẩn khác"
+              >
+                Gộp mã
+              </button>
               <button
                 onClick={() => startEdit(product)}
                 className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
@@ -464,7 +563,7 @@ export function ProductCatalog({
         const jsonData = XLSX.utils.sheet_to_json(ws, { header: 1 }) as any[][];
 
         if (jsonData.length < 2) {
-          alert("File không có dữ liệu hoặc sai định dạng.");
+          showToast("File không có dữ liệu hoặc sai định dạng.");
           return;
         }
 
@@ -479,7 +578,7 @@ export function ProductCatalog({
         const { colMap, headerIndex } = mapping;
 
         if (headerIndex === -1 || colMap.sku === -1 || colMap.name === -1) {
-          alert(
+          showToast(
             "Lỗi: Không thể nhận diện được các cột bắt buộc (Mã sản phẩm, Tên sản phẩm) từ file Excel. Vui lòng kiểm tra lại tiêu đề cột hoặc thử lại (có thể do lỗi kết nối AI).",
           );
           return;
@@ -564,13 +663,13 @@ export function ProductCatalog({
           onBulkUpdateProducts(productsToUpdate);
         }
 
-        alert(
+        showToast(
           `Kết quả nhập liệu:\n- Thêm mới: ${productsToAdd.length}\n- Cập nhật: ${productsToUpdate.length}\n- Bỏ qua: ${skippedCount}`,
         );
         setShowImportModal(false);
       } catch (error) {
         console.error("Error importing products:", error);
-        alert("Có lỗi xảy ra khi xử lý file. Vui lòng kiểm tra lại định dạng file (.xlsx, .xls, .csv) hoặc liên hệ hỗ trợ.");
+        showToast("Có lỗi xảy ra khi xử lý file. Vui lòng kiểm tra lại định dạng file (.xlsx, .xls, .csv) hoặc liên hệ hỗ trợ.");
       } finally {
         setIsImporting(false);
         if (fileInputRef.current) fileInputRef.current.value = "";
@@ -599,7 +698,7 @@ export function ProductCatalog({
       } as unknown as React.ChangeEvent<HTMLInputElement>;
       handleImportExcel(mockEvent);
     } else {
-      alert("Vui lòng kéo thả file Excel (.xlsx, .xls, .csv)");
+      showToast("Vui lòng kéo thả file Excel (.xlsx, .xls, .csv)");
     }
   };
 
@@ -612,6 +711,101 @@ export function ProductCatalog({
     >
       {/* Import Modal */}
       {/* Modals */}
+      {mergingProduct && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+              <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                Gộp mã sản phẩm
+              </h3>
+              <button
+                onClick={() => {
+                  setMergingProduct(null);
+                  setMergeTargetId("");
+                }}
+                className="p-2 hover:bg-slate-200 rounded-full transition-colors"
+                disabled={isMerging}
+              >
+                <X className="w-5 h-5 text-slate-500" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-slate-700">Sản phẩm hiện tại (Hàng tạm):</p>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-900 font-medium">
+                  {mergingProduct.name} ({mergingProduct.sku})
+                </div>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-slate-700">Gộp vào Sản phẩm chuẩn:</label>
+                <select
+                  value={mergeTargetId}
+                  onChange={(e) => setMergeTargetId(e.target.value)}
+                  className="w-full p-3 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none"
+                  disabled={isMerging}
+                >
+                  <option value="">-- Chọn sản phẩm chuẩn --</option>
+                  {products.filter(p => p.id !== mergingProduct.id).map(p => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({p.sku})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-xs text-rose-600 bg-rose-50 p-3 rounded-lg border border-rose-100">
+                <strong>Lưu ý:</strong> Hành động này sẽ cập nhật tất cả Đơn hàng và Báo giá đang dùng tên "{mergingProduct.name}" thành tên của sản phẩm chuẩn được chọn, sau đó xóa mã "{mergingProduct.sku}" khỏi danh mục. Không thể hoàn tác!
+              </p>
+            </div>
+            <div className="p-6 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+              <button
+                onClick={() => {
+                  setMergingProduct(null);
+                  setMergeTargetId("");
+                }}
+                className="px-4 py-2 text-slate-600 font-medium hover:bg-slate-200 rounded-xl transition-colors"
+                disabled={isMerging}
+              >
+                Hủy
+              </button>
+              <button
+                onClick={async () => {
+                  if (!mergeTargetId) {
+                    showToast("Vui lòng chọn sản phẩm chuẩn để gộp.");
+                    return;
+                  }
+                  const targetProduct = products.find(p => p.id === mergeTargetId);
+                  if (!targetProduct) return;
+                  
+                  setIsMerging(true);
+                  try {
+                    await onMergeProducts(mergingProduct, targetProduct);
+                    setMergingProduct(null);
+                    setMergeTargetId("");
+                    showToast("Gộp sản phẩm thành công!");
+                  } catch (error) {
+                    console.error("Error merging products:", error);
+                    showToast("Có lỗi xảy ra khi gộp sản phẩm.");
+                  } finally {
+                    setIsMerging(false);
+                  }
+                }}
+                disabled={!mergeTargetId || isMerging}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded-xl font-medium transition-colors shadow-sm shadow-indigo-600/20 disabled:opacity-50 flex items-center gap-2"
+              >
+                {isMerging ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Đang gộp...
+                  </>
+                ) : (
+                  "Xác nhận Gộp"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <ConfirmModal
         isOpen={confirmDeleteIds !== null}
         title="Xác nhận xóa"
@@ -626,8 +820,8 @@ export function ProductCatalog({
 
       {showImportModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden animate-in zoom-in-95 duration-200">
-            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 shrink-0">
               <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
                 <Upload className="w-6 h-6 text-emerald-600" />
                 Nhập sản phẩm từ Excel
@@ -640,7 +834,7 @@ export function ProductCatalog({
               </button>
             </div>
 
-            <div className="p-8 space-y-8">
+            <div className="p-8 space-y-8 overflow-y-auto">
               {/* File Upload Area */}
               <div
                 onClick={() => modalFileInputRef.current?.click()}
@@ -765,7 +959,7 @@ export function ProductCatalog({
               </div>
             </div>
 
-            <div className="p-6 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
+            <div className="p-6 bg-slate-50 border-t border-slate-100 flex justify-end gap-3 shrink-0">
               <button
                 onClick={() => setShowImportModal(false)}
                 className="px-6 py-2.5 text-slate-600 font-medium hover:bg-slate-200 rounded-xl transition-colors"
@@ -785,11 +979,11 @@ export function ProductCatalog({
           </div>
         </div>
       )}
-      <div className="flex justify-between items-center mb-8">
+      <div className="flex justify-between items-center mb-6">
         <div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight flex items-center gap-3">
             <Package className="w-8 h-8 text-emerald-600" />
-            Danh mục Sản phẩm Chuẩn
+            Danh mục Sản phẩm
           </h1>
           <p className="text-slate-500 mt-1">
             {isAdmin 
@@ -832,7 +1026,44 @@ export function ProductCatalog({
         )}
       </div>
 
-      {(isAdding || editingId) && (
+      <div className="flex gap-6 border-b border-slate-200 mb-6">
+        <button
+          onClick={() => {
+            setActiveTab('standard');
+            setCurrentPage(1);
+          }}
+          className={`pb-3 text-sm font-bold uppercase tracking-wider transition-colors relative ${
+            activeTab === 'standard'
+              ? 'text-emerald-600'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Hàng Chuẩn ({standardProductsCount})
+          {activeTab === 'standard' && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-600 rounded-t-full" />
+          )}
+        </button>
+        <button
+          onClick={() => {
+            setActiveTab('custom');
+            setCurrentPage(1);
+          }}
+          className={`pb-3 text-sm font-bold uppercase tracking-wider transition-colors relative ${
+            activeTab === 'custom'
+              ? 'text-emerald-600'
+              : 'text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          Hàng Tạm ({unsyncedCount})
+          {activeTab === 'custom' && (
+            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-600 rounded-t-full" />
+          )}
+        </button>
+      </div>
+
+      {activeTab === 'standard' ? (
+        <>
+          {(isAdding || editingId) && (
         <div className="bg-white p-6 rounded-2xl shadow-md border border-emerald-100 mb-8 animate-in fade-in slide-in-from-top-4 duration-300">
           <h2 className="text-lg font-bold text-slate-900 mb-4 flex items-center gap-2">
             {editingId ? (
@@ -1030,12 +1261,12 @@ export function ProductCatalog({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {paginatedProducts.map((product) => (
+              {paginatedProducts.map((product, index) => (
                 <tr
                   key={product.id}
                   className={`hover:bg-slate-50/80 transition-colors ${selectedIds.has(product.id) ? "bg-emerald-50/30" : ""}`}
                 >
-                  {columnOrder.map((col) => renderCell(col, product))}
+                  {columnOrder.map((col) => renderCell(col, product, index))}
                 </tr>
               ))}
               {paginatedProducts.length === 0 && (
@@ -1081,6 +1312,25 @@ export function ProductCatalog({
           </div>
         )}
       </div>
+        </>
+      ) : (
+        <AdminDatabase
+          orders={orders}
+          quotations={quotations}
+          products={products}
+          onUpdateOrder={onUpdateOrder}
+          onBulkUpdateOrders={onBulkUpdateOrders}
+          onBulkAddProducts={onBulkAddProducts}
+          onSyncAllProducts={onSyncAllProducts}
+          isEmbedded={true}
+        />
+      )}
+
+      {toastMessage && (
+        <div className="fixed bottom-4 right-4 bg-slate-800 text-white px-6 py-3 rounded-lg shadow-lg z-50 animate-fade-in">
+          {toastMessage}
+        </div>
+      )}
     </div>
   );
 }

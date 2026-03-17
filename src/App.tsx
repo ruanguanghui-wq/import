@@ -54,15 +54,22 @@ function App() {
   const syncProductsToAll = async (productsToSync: Product[]) => {
     if (productsToSync.length === 0) return;
 
-    // Create a map for faster lookup
-    const productMap = new Map(productsToSync.map(p => [p.sku, p.name]));
+    // Create a map for faster lookup (case-insensitive)
+    const productMap = new Map<string, string>();
+    productsToSync.forEach(p => {
+      productMap.set(p.sku.toLowerCase().trim(), p.name);
+      productMap.set(p.name.toLowerCase().trim(), p.name);
+    });
 
     // Sync to Orders
     const updatedOrders: Order[] = [];
     orders.forEach(order => {
       let hasChanges = false;
       const updatedItems = order.items.map(item => {
-        const newName = productMap.get(item.name);
+        const searchKey1 = String(item.name || "").toLowerCase().trim();
+        const searchKey2 = String(item.productName || "").toLowerCase().trim();
+        const newName = (searchKey1 && productMap.get(searchKey1)) || (searchKey2 && productMap.get(searchKey2));
+        
         if (newName && item.productName !== newName) {
           hasChanges = true;
           return { ...item, productName: newName };
@@ -70,8 +77,47 @@ function App() {
         return item;
       });
 
+      const updatedOrderFiles = (order.orderFiles || []).map(file => {
+        let fileHasChanges = false;
+        const updatedRecords = file.records.map(record => {
+          const searchKey1 = String(record.name || "").toLowerCase().trim();
+          const searchKey2 = String(record.productName || "").toLowerCase().trim();
+          const newName = (searchKey1 && productMap.get(searchKey1)) || (searchKey2 && productMap.get(searchKey2));
+          
+          if (newName && record.productName !== newName) {
+            fileHasChanges = true;
+            return { ...record, productName: newName };
+          }
+          return record;
+        });
+        if (fileHasChanges) hasChanges = true;
+        return fileHasChanges ? { ...file, records: updatedRecords } : file;
+      });
+
+      const updatedReceipts = (order.receipts || []).map(receipt => {
+        let receiptHasChanges = false;
+        const updatedRecords = receipt.records.map(record => {
+          const searchKey1 = String(record.name || "").toLowerCase().trim();
+          const searchKey2 = String(record.productName || "").toLowerCase().trim();
+          const newName = (searchKey1 && productMap.get(searchKey1)) || (searchKey2 && productMap.get(searchKey2));
+          
+          if (newName && record.productName !== newName) {
+            receiptHasChanges = true;
+            return { ...record, productName: newName };
+          }
+          return record;
+        });
+        if (receiptHasChanges) hasChanges = true;
+        return receiptHasChanges ? { ...receipt, records: updatedRecords } : receipt;
+      });
+
       if (hasChanges) {
-        updatedOrders.push({ ...order, items: updatedItems });
+        updatedOrders.push({ 
+          ...order, 
+          items: updatedItems,
+          orderFiles: updatedOrderFiles,
+          receipts: updatedReceipts
+        });
       }
     });
 
@@ -87,7 +133,10 @@ function App() {
     quotations.forEach(quotation => {
       let hasChanges = false;
       const updatedItems = quotation.items.map(item => {
-        const newName = productMap.get(item.name);
+        const searchKey1 = String(item.name || "").toLowerCase().trim();
+        const searchKey2 = String(item.productName || "").toLowerCase().trim();
+        const newName = (searchKey1 && productMap.get(searchKey1)) || (searchKey2 && productMap.get(searchKey2));
+        
         if (newName && item.productName !== newName) {
           hasChanges = true;
           return { ...item, productName: newName };
@@ -118,14 +167,117 @@ function App() {
     await syncProductsToAll([product]);
   };
 
-  const handleBulkAddProducts = async (newProducts: Product[]) => {
+  const handleBulkAddProducts = async (newProducts: Product[], skipSync = false) => {
     await storeBulkAddProducts(newProducts);
-    await syncProductsToAll(newProducts);
+    if (!skipSync) {
+      await syncProductsToAll(newProducts);
+    }
   };
 
   const handleBulkUpdateProducts = async (updatedProducts: Product[]) => {
     await storeBulkUpdateProducts(updatedProducts);
     await syncProductsToAll(updatedProducts);
+  };
+
+  const handleMergeProducts = async (sourceProduct: Product, targetProduct: Product) => {
+    // 1. Update Orders
+    const updatedOrders: Order[] = [];
+    orders.forEach(order => {
+      let hasChanges = false;
+      const updatedItems = order.items.map(item => {
+        const itemName = String(item.name || "").trim().toLowerCase();
+        const itemProductName = String(item.productName || "").trim().toLowerCase();
+        const sourceName = sourceProduct.name.trim().toLowerCase();
+        const sourceSku = sourceProduct.sku.trim().toLowerCase();
+
+        if (itemName === sourceName || itemName === sourceSku || itemProductName === sourceName || itemProductName === sourceSku) {
+          hasChanges = true;
+          return { ...item, productName: targetProduct.name };
+        }
+        return item;
+      });
+
+      const updatedOrderFiles = (order.orderFiles || []).map(file => {
+        let fileHasChanges = false;
+        const updatedRecords = file.records.map(record => {
+          const recordName = String(record.name || "").trim().toLowerCase();
+          const recordProductName = String(record.productName || "").trim().toLowerCase();
+          const sourceName = sourceProduct.name.trim().toLowerCase();
+          const sourceSku = sourceProduct.sku.trim().toLowerCase();
+
+          if (recordName === sourceName || recordName === sourceSku || recordProductName === sourceName || recordProductName === sourceSku) {
+            fileHasChanges = true;
+            return { ...record, productName: targetProduct.name };
+          }
+          return record;
+        });
+        if (fileHasChanges) hasChanges = true;
+        return fileHasChanges ? { ...file, records: updatedRecords } : file;
+      });
+
+      const updatedReceipts = (order.receipts || []).map(receipt => {
+        let receiptHasChanges = false;
+        const updatedRecords = receipt.records.map(record => {
+          const recordName = String(record.name || "").trim().toLowerCase();
+          const recordProductName = String(record.productName || "").trim().toLowerCase();
+          const sourceName = sourceProduct.name.trim().toLowerCase();
+          const sourceSku = sourceProduct.sku.trim().toLowerCase();
+
+          if (recordName === sourceName || recordName === sourceSku || recordProductName === sourceName || recordProductName === sourceSku) {
+            receiptHasChanges = true;
+            return { ...record, productName: targetProduct.name };
+          }
+          return record;
+        });
+        if (receiptHasChanges) hasChanges = true;
+        return receiptHasChanges ? { ...receipt, records: updatedRecords } : receipt;
+      });
+
+      if (hasChanges) {
+        updatedOrders.push({ 
+          ...order, 
+          items: updatedItems,
+          orderFiles: updatedOrderFiles,
+          receipts: updatedReceipts
+        });
+      }
+    });
+
+    // 2. Update Quotations
+    const updatedQuotations: Quotation[] = [];
+    quotations.forEach(quotation => {
+      let hasChanges = false;
+      const updatedItems = quotation.items.map(item => {
+        const itemName = String(item.name || "").trim().toLowerCase();
+        const itemProductName = String(item.productName || "").trim().toLowerCase();
+        const sourceName = sourceProduct.name.trim().toLowerCase();
+        const sourceSku = sourceProduct.sku.trim().toLowerCase();
+
+        if (itemName === sourceName || itemName === sourceSku || itemProductName === sourceName || itemProductName === sourceSku) {
+          hasChanges = true;
+          return { ...item, productName: targetProduct.name };
+        }
+        return item;
+      });
+      if (hasChanges) {
+        updatedQuotations.push({ ...quotation, items: updatedItems });
+      }
+    });
+
+    // 3. Save changes
+    if (updatedOrders.length > 0) {
+      for (let i = 0; i < updatedOrders.length; i += 500) {
+        await bulkUpdateOrders(updatedOrders.slice(i, i + 500));
+      }
+    }
+    if (updatedQuotations.length > 0) {
+      for (let i = 0; i < updatedQuotations.length; i += 500) {
+        await bulkUpdateQuotations(updatedQuotations.slice(i, i + 500));
+      }
+    }
+
+    // 4. Delete source product
+    await storeBulkDeleteProducts([sourceProduct.id]);
   };
 
   const [currentView, setCurrentView] = useState<ViewType>("list");
@@ -245,6 +397,7 @@ function App() {
             {currentView === "detail" && selectedOrder && (
               <OrderDetail
                 order={selectedOrder}
+                allOrders={orders}
                 onUpdate={updateOrder}
                 onBack={() => setCurrentView("list")}
                 products={products}
@@ -254,23 +407,27 @@ function App() {
             {currentView === "files" && (
               <FileManager
                 orders={orders}
+                products={products}
                 onUpdateOrder={updateOrder}
                 onDeleteOrder={deleteOrder}
                 onCreateOrder={() => setCurrentView("create")}
               />
             )}
-            {currentView === "admin" && user.role === "admin" && (
-              <AdminDatabase orders={orders} onUpdateOrder={updateOrder} />
-            )}
             {currentView === "catalog" && user.role === "admin" && (
               <ProductCatalog
                 products={products}
+                orders={orders}
+                quotations={quotations}
                 onAddProduct={handleAddProduct}
                 onUpdateProduct={handleUpdateProduct}
                 onDeleteProduct={deleteProduct}
                 onBulkAddProducts={handleBulkAddProducts}
                 onBulkUpdateProducts={handleBulkUpdateProducts}
                 onBulkDeleteProducts={storeBulkDeleteProducts}
+                onMergeProducts={handleMergeProducts}
+                onUpdateOrder={updateOrder}
+                onBulkUpdateOrders={bulkUpdateOrders}
+                onSyncAllProducts={syncProductsToAll}
               />
             )}
             {currentView === "sso" && user.role === "admin" && (

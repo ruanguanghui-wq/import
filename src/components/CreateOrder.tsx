@@ -36,9 +36,11 @@ export function CreateOrder({
   products = [],
 }: CreateOrderProps) {
   const [name, setName] = useState("");
+  const [orderCode, setOrderCode] = useState("");
   const [type, setType] = useState<OrderType>(OrderType.SALES);
   const [supplier, setSupplier] = useState("");
   const [customerName, setCustomerName] = useState("");
+  const [customerCode, setCustomerCode] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [userId, setUserId] = useState("");
   const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
@@ -169,10 +171,19 @@ export function CreateOrder({
         }
 
         const newItems: OrderItem[] = parsedRecords.map((record) => {
+          const searchKey1 = String(record.name || "").toLowerCase().trim();
+          const searchKey2 = String(record.productName || "").toLowerCase().trim();
+          
+          let matchedProduct = products.find(p => 
+            p.sku.toLowerCase().trim() === searchKey1 || 
+            p.name.toLowerCase().trim() === searchKey1 ||
+            (searchKey2 && (p.sku.toLowerCase().trim() === searchKey2 || p.name.toLowerCase().trim() === searchKey2))
+          );
+
           return {
             id: crypto.randomUUID(),
             name: record.name,
-            productName: record.productName,
+            productName: matchedProduct ? matchedProduct.name : record.productName,
             orderedQty: record.qty,
             expectedPrice: record.price,
             receivedQty: 0,
@@ -241,7 +252,19 @@ export function CreateOrder({
     setItems(
       items.map((item) => {
         if (item.id === id) {
-          return { ...item, [field]: value };
+          const updatedItem = { ...item, [field]: value };
+          if (field === "name") {
+            const searchKey = String(value).toLowerCase().trim();
+            const matchedProduct = products.find(p => p.sku.toLowerCase().trim() === searchKey || p.name.toLowerCase().trim() === searchKey);
+            if (matchedProduct) {
+              updatedItem.productName = matchedProduct.name;
+              if (updatedItem.expectedPrice === 0 && matchedProduct.basePrice) {
+                updatedItem.expectedPrice = matchedProduct.basePrice;
+                updatedItem.actualPrice = matchedProduct.basePrice;
+              }
+            }
+          }
+          return updatedItem;
         }
         return item;
       }),
@@ -297,10 +320,19 @@ export function CreateOrder({
             : 0;
 
           if (name && qty > 0) {
+            const searchKey1 = name.toLowerCase().trim();
+            const searchKey2 = productName.toLowerCase().trim();
+            
+            let matchedProduct = products.find(p => 
+              p.sku.toLowerCase().trim() === searchKey1 || 
+              p.name.toLowerCase().trim() === searchKey1 ||
+              (searchKey2 && (p.sku.toLowerCase().trim() === searchKey2 || p.name.toLowerCase().trim() === searchKey2))
+            );
+
             return {
               id: crypto.randomUUID(),
               name,
-              productName,
+              productName: matchedProduct ? matchedProduct.name : productName,
               orderedQty: qty,
               expectedPrice: price,
               receivedQty: 0,
@@ -346,9 +378,11 @@ export function CreateOrder({
 
     const newOrder: Order = {
       id: crypto.randomUUID(),
+      orderCode: orderCode.trim(),
       name,
       type,
       supplier,
+      customerCode: customerCode.trim(),
       customerName: customerName.trim() || "Khách lẻ",
       customerEmail: customerEmail,
       userId: userId,
@@ -362,7 +396,7 @@ export function CreateOrder({
     };
 
     try {
-      await onSave(recalculateOrder(newOrder));
+      await onSave(recalculateOrder(newOrder, products));
     } catch (err) {
       console.error("Error saving order:", err);
     }
@@ -455,6 +489,18 @@ export function CreateOrder({
               className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
             />
           </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">
+              Mã đơn hàng
+            </label>
+            <input
+              type="text"
+              value={orderCode}
+              onChange={(e) => setOrderCode(e.target.value)}
+              placeholder="VD: ORD-2023-001"
+              className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+            />
+          </div>
           {userRole === "admin" && type === OrderType.SALES && (
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">
@@ -481,6 +527,20 @@ export function CreateOrder({
                     </option>
                   ))}
               </select>
+            </div>
+          )}
+          {userRole === "admin" && type === OrderType.SALES && (
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">
+                Mã khách hàng
+              </label>
+              <input
+                type="text"
+                value={customerCode}
+                onChange={(e) => setCustomerCode(e.target.value)}
+                placeholder="VD: KH001"
+                className="w-full px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+              />
             </div>
           )}
           {type === OrderType.PURCHASE && (

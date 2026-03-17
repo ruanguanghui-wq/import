@@ -138,10 +138,12 @@ export interface OrderHistory {
 
 export interface Order {
   id: string;
+  orderCode?: string;
   name: string;
   date: string;
   type: OrderType;
   supplier?: string;
+  customerCode?: string;
   customerName?: string;
   customerEmail?: string;
   userId?: string;
@@ -165,6 +167,7 @@ export interface Product {
   sku: string;
   name: string;
   basePrice: number;
+  type?: 'standard' | 'custom';
   unit?: string;
   category?: string;
   description?: string;

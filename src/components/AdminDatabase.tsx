@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { Order } from "../types";
+import { Order, Product, Quotation } from "../types";
 import { formatCurrency, formatNumber } from "../utils";
 import {
   Search,
@@ -13,9 +13,11 @@ import {
   Trash2,
   CheckSquare,
   Square,
+  RefreshCw,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import { recalculateOrder } from "../orderUtils";
+import { ConfirmModal } from "./ConfirmModal";
 
 type SortField =
   | "customerName"
@@ -34,15 +36,35 @@ type SortDirection = "asc" | "desc";
 
 interface AdminDatabaseProps {
   orders: Order[];
+  quotations?: Quotation[];
+  products: Product[];
   onUpdateOrder: (order: Order) => Promise<void>;
+  onBulkUpdateOrders: (orders: Order[]) => Promise<void>;
+  onBulkAddProducts: (products: Product[], skipSync?: boolean) => Promise<void>;
+  onSyncAllProducts: (products: Product[]) => Promise<void>;
+  isEmbedded?: boolean;
 }
 
-export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
+export function AdminDatabase({ orders, quotations = [], products, onUpdateOrder, onBulkUpdateOrders, onBulkAddProducts, onSyncAllProducts, isEmbedded = false }: AdminDatabaseProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [sortField, setSortField] = useState<SortField>("orderDate");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
 
   const [selectedNames, setSelectedNames] = useState<Set<string>>(new Set());
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText: string;
+    onConfirm: () => void;
+  } | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (message: string) => {
+    setToastMessage(message);
+    setTimeout(() => setToastMessage(null), 3000);
+  };
   const [showFilters, setShowFilters] = useState(false);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -54,16 +76,36 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
     "all" | "missing" | "completed" | "over_received"
   >("all");
 
+  const [syncFilter, setSyncFilter] = useState<"all" | "unsynced" | "discrepancy">(isEmbedded ? "unsynced" : "all");
+
   const allItems = useMemo(() => {
-    const flatItems = orders.flatMap((order) =>
-      order.items.map((item) => ({
-        ...item,
-        orderName: order.name,
-        customerName: order.customerName || "Khách lẻ",
-        orderDate: order.date,
-        supplier: order.supplier,
-      })),
-    );
+    const flatItems = [
+      ...orders.flatMap((order) =>
+        order.items.map((item) => ({
+          ...item,
+          orderName: order.name,
+          customerName: order.customerName || "Khách lẻ",
+          orderDate: order.date,
+          supplier: order.supplier,
+        })),
+      ),
+      ...quotations.flatMap((quotation) =>
+        quotation.items.map((item) => ({
+          id: item.id,
+          name: item.name,
+          productName: item.productName,
+          orderedQty: item.quantity,
+          expectedPrice: item.quotedPrice,
+          receivedQty: 0,
+          actualPrice: 0,
+          totalReceivedCost: 0,
+          orderName: quotation.name,
+          customerName: quotation.customerName || "Khách lẻ",
+          orderDate: quotation.date,
+          supplier: quotation.supplierName,
+        })),
+      )
+    ];
 
     const groupedItems = new Map<string, (typeof flatItems)[0]>();
 
@@ -100,7 +142,7 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
     });
 
     return Array.from(groupedItems.values());
-  }, [orders]);
+  }, [orders, quotations]);
 
   const sortedAndFilteredItems = useMemo(() => {
     let result = allItems.filter((item) => {
@@ -138,6 +180,23 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
       if (statusFilter === "missing" && missingQty === 0) return false;
       if (statusFilter === "completed" && !isCompleted) return false;
       if (statusFilter === "over_received" && !isOverReceived) return false;
+
+      if (syncFilter === "unsynced" || syncFilter === "discrepancy") {
+        const itemName = (item.name || "").trim().toLowerCase();
+        const itemProductName = (item.productName || "").trim().toLowerCase();
+        const matchedProduct = products.find(p => 
+          p.sku.toLowerCase().trim() === itemName || 
+          p.name.toLowerCase().trim() === itemName ||
+          p.sku.toLowerCase().trim() === itemProductName ||
+          p.name.toLowerCase().trim() === itemProductName
+        );
+        
+        if (syncFilter === "unsynced" && matchedProduct) return false;
+        if (syncFilter === "discrepancy") {
+          if (!matchedProduct) return false;
+          if (matchedProduct.basePrice === item.expectedPrice) return false;
+        }
+      }
 
       return true;
     });
@@ -217,35 +276,38 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
 
   const handleBulkDelete = async () => {
     if (selectedNames.size === 0) return;
-    if (
-      !window.confirm(
-        `Bạn có chắc chắn muốn xóa ${selectedNames.size} sản phẩm này khỏi tất cả đơn hàng?`,
-      )
-    )
-      return;
+    
+    setConfirmModal({
+      isOpen: true,
+      title: "Xác nhận xóa",
+      message: `Bạn có chắc chắn muốn xóa ${selectedNames.size} sản phẩm này khỏi tất cả đơn hàng?`,
+      confirmText: "Xóa",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        try {
+          const ordersToUpdate = orders.filter((order) =>
+            order.items.some((item) => selectedNames.has(item.name)),
+          );
 
-    try {
-      const ordersToUpdate = orders.filter((order) =>
-        order.items.some((item) => selectedNames.has(item.name)),
-      );
+          for (const order of ordersToUpdate) {
+            const updatedItems = order.items.filter(
+              (item) => !selectedNames.has(item.name),
+            );
+            const updatedOrder = recalculateOrder({
+              ...order,
+              items: updatedItems,
+            }, products);
+            await onUpdateOrder(updatedOrder);
+          }
 
-      for (const order of ordersToUpdate) {
-        const updatedItems = order.items.filter(
-          (item) => !selectedNames.has(item.name),
-        );
-        const updatedOrder = recalculateOrder({
-          ...order,
-          items: updatedItems,
-        });
-        await onUpdateOrder(updatedOrder);
+          setSelectedNames(new Set());
+          showToast("Đã xóa các mục đã chọn thành công.");
+        } catch (error) {
+          console.error("Error bulk deleting:", error);
+          showToast("Có lỗi xảy ra khi xóa hàng loạt.");
+        }
       }
-
-      setSelectedNames(new Set());
-      alert("Đã xóa các mục đã chọn thành công.");
-    } catch (error) {
-      console.error("Error bulk deleting:", error);
-      alert("Có lỗi xảy ra khi xóa hàng loạt.");
-    }
+    });
   };
 
   const SortIcon = ({ field }: { field: SortField }) => {
@@ -256,6 +318,115 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
     ) : (
       <ArrowDown className="w-4 h-4 text-rose-500" />
     );
+  };
+
+  const handleSyncCatalog = async () => {
+    setConfirmModal({
+      isOpen: true,
+      title: "Đồng bộ Danh mục",
+      message: "Đồng bộ dữ liệu sẽ cập nhật tên sản phẩm trong các đơn hàng theo Danh mục chuẩn, và thêm các sản phẩm mới vào Danh mục. Bạn có chắc chắn?",
+      confirmText: "Đồng bộ",
+      onConfirm: async () => {
+        setConfirmModal(null);
+        setIsSyncing(true);
+        try {
+          const newProducts: Product[] = [];
+
+          // Create a map for quick lookup
+          const productMap = new Map<string, Product>();
+          products.forEach(p => {
+            productMap.set(p.sku.toLowerCase().trim(), p);
+            productMap.set(p.name.toLowerCase().trim(), p);
+          });
+
+          // 1. Find new products to add to catalog
+          const uniqueItems = new Map<string, { sku: string; name: string; price: number }>();
+          
+          orders.forEach(order => {
+            order.items.forEach(item => {
+              const itemName = (item.name || "").trim();
+              const itemProductName = (item.productName || "").trim();
+              
+              const searchKey1 = itemName.toLowerCase();
+              const searchKey2 = itemProductName.toLowerCase();
+              
+              let matchedProduct = productMap.get(searchKey1) || productMap.get(searchKey2);
+              
+              if (!matchedProduct) {
+                // Not in catalog, mark for addition
+                const key = searchKey1 || searchKey2;
+                if (key) {
+                  const newName = itemProductName || itemName;
+                  if (!uniqueItems.has(key)) {
+                    uniqueItems.set(key, { 
+                      sku: itemName,
+                      name: newName, 
+                      price: item.expectedPrice || 0 
+                    });
+                  }
+                }
+              }
+            });
+          });
+
+          quotations.forEach(quotation => {
+            quotation.items.forEach(item => {
+              const itemName = (item.name || "").trim();
+              const itemProductName = (item.productName || "").trim();
+              
+              const searchKey1 = itemName.toLowerCase();
+              const searchKey2 = itemProductName.toLowerCase();
+              
+              let matchedProduct = productMap.get(searchKey1) || productMap.get(searchKey2);
+              
+              if (!matchedProduct) {
+                // Not in catalog, mark for addition
+                const key = searchKey1 || searchKey2;
+                if (key) {
+                  const newName = itemProductName || itemName;
+                  if (!uniqueItems.has(key)) {
+                    uniqueItems.set(key, { 
+                      sku: itemName,
+                      name: newName, 
+                      price: item.quotedPrice || 0 
+                    });
+                  }
+                }
+              }
+            });
+          });
+
+          // Add new products to catalog
+          uniqueItems.forEach((value) => {
+            newProducts.push({
+              id: crypto.randomUUID(),
+              sku: value.sku,
+              name: value.name,
+              basePrice: value.price,
+              type: 'standard',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            });
+          });
+
+          if (newProducts.length > 0) {
+            for (let i = 0; i < newProducts.length; i += 500) {
+              await onBulkAddProducts(newProducts.slice(i, i + 500), true);
+            }
+          }
+
+          // Sync all products (existing + new) to all orders and quotations in one go
+          await onSyncAllProducts([...products, ...newProducts]);
+
+          showToast(`Đồng bộ thành công! Đã thêm ${newProducts.length} sản phẩm mới.`);
+        } catch (error) {
+          console.error("Error syncing catalog:", error);
+          showToast("Có lỗi xảy ra khi đồng bộ. Vui lòng thử lại.");
+        } finally {
+          setIsSyncing(false);
+        }
+      }
+    });
   };
 
   const handleExportExcel = () => {
@@ -296,18 +467,59 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
   };
 
   return (
-    <div className="p-8 max-w-7xl mx-auto h-full flex flex-col">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
-            <Database className="w-6 h-6 text-rose-500" />
-            Database Tổng Hợp
-          </h1>
-          <p className="text-slate-500 mt-1">
-            Quản lý toàn bộ dữ liệu nhập hàng từ tất cả khách hàng
-          </p>
+    <div className={isEmbedded ? "h-full flex flex-col" : "p-8 max-w-7xl mx-auto h-full flex flex-col"}>
+      {!isEmbedded && (
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-8">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 flex items-center gap-2">
+              <Database className="w-6 h-6 text-rose-500" />
+              Database Tổng Hợp
+            </h1>
+            <p className="text-slate-500 mt-1">
+              Quản lý toàn bộ dữ liệu nhập hàng từ tất cả khách hàng
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSyncCatalog}
+              disabled={isSyncing}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl font-medium flex items-center gap-2 transition-all shadow-sm shadow-indigo-600/20 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 ${isSyncing ? "animate-spin" : ""}`} />
+              Đồng bộ Danh mục
+            </button>
+            {selectedNames.size > 0 && (
+              <button
+                onClick={handleBulkDelete}
+                className="bg-rose-600 hover:bg-rose-700 text-white px-4 py-2 rounded-xl font-medium flex items-center gap-2 transition-all shadow-sm shadow-rose-600/20"
+              >
+                <Trash2 className="w-4 h-4" />
+                Xóa ({selectedNames.size})
+              </button>
+            )}
+            <button
+              onClick={handleExportExcel}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl font-medium flex items-center gap-2 transition-all shadow-sm shadow-emerald-600/20"
+            >
+              <Download className="w-4 h-4" />
+              {selectedNames.size > 0
+                ? `Xuất Excel (${selectedNames.size})`
+                : "Xuất Excel Tổng"}
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
+      )}
+
+      {isEmbedded && (
+        <div className="flex justify-end gap-3 mb-4">
+          <button
+            onClick={handleSyncCatalog}
+            disabled={isSyncing}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl font-medium flex items-center gap-2 transition-all shadow-sm shadow-indigo-600/20 disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${isSyncing ? "animate-spin" : ""}`} />
+            Đồng bộ Danh mục
+          </button>
           {selectedNames.size > 0 && (
             <button
               onClick={handleBulkDelete}
@@ -327,7 +539,7 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
               : "Xuất Excel Tổng"}
           </button>
         </div>
-      </div>
+      )}
 
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 flex-1 flex flex-col overflow-hidden">
         <div className="p-4 border-b border-slate-100 flex flex-col gap-4 bg-slate-50/50">
@@ -353,7 +565,8 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
                   maxQty ||
                   minPrice ||
                   maxPrice ||
-                  statusFilter !== "all"
+                  statusFilter !== "all" ||
+                  syncFilter !== (isEmbedded ? "unsynced" : "all")
                     ? "bg-rose-50 text-rose-700 border-rose-200"
                     : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
                 }`}
@@ -368,7 +581,21 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
           </div>
 
           {showFilters && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 p-4 bg-white rounded-xl border border-slate-200 mt-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 p-4 bg-white rounded-xl border border-slate-200 mt-2">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">
+                  Trạng thái đồng bộ
+                </label>
+                <select
+                  value={syncFilter}
+                  onChange={(e) => setSyncFilter(e.target.value as any)}
+                  className="w-full px-3 py-1.5 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500"
+                >
+                  <option value="all">Tất cả</option>
+                  <option value="unsynced">Chưa đồng bộ</option>
+                  <option value="discrepancy">Sai lệch giá</option>
+                </select>
+              </div>
               <div>
                 <label className="block text-xs font-medium text-slate-500 mb-1">
                   Thời gian tạo
@@ -485,6 +712,9 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
                     )}
                   </button>
                 </th>
+                <th className="px-6 py-4 w-16 text-center whitespace-nowrap">
+                  STT
+                </th>
                 <th
                   className="px-6 py-4 cursor-pointer hover:bg-slate-100 transition-colors"
                   onClick={() => handleSort("customerName")}
@@ -565,6 +795,7 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
                     Giá thực tế <SortIcon field="actualPrice" />
                   </div>
                 </th>
+                <th className="px-6 py-4 text-center">Trạng thái</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -575,6 +806,29 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
                         item.receivedQty * item.actualPrice) / item.receivedQty
                     : item.actualPrice;
                 const isSelected = selectedNames.has(item.name);
+                
+                const itemName = (item.name || "").trim().toLowerCase();
+                const itemProductName = (item.productName || "").trim().toLowerCase();
+                const matchedProduct = products.find(p => 
+                  p.sku.toLowerCase().trim() === itemName || 
+                  p.name.toLowerCase().trim() === itemName ||
+                  p.sku.toLowerCase().trim() === itemProductName ||
+                  p.name.toLowerCase().trim() === itemProductName
+                );
+                
+                let statusText = "Chưa đồng bộ";
+                let statusColor = "bg-rose-100 text-rose-800";
+                
+                if (matchedProduct) {
+                  if (matchedProduct.basePrice !== item.expectedPrice) {
+                    statusText = "Sai lệch giá";
+                    statusColor = "bg-amber-100 text-amber-800";
+                  } else {
+                    statusText = "Đã đồng bộ";
+                    statusColor = "bg-emerald-100 text-emerald-800";
+                  }
+                }
+
                 return (
                   <tr
                     key={`${item.id}-${index}`}
@@ -591,6 +845,9 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
                           <Square className="w-5 h-5" />
                         )}
                       </button>
+                    </td>
+                    <td className="px-6 py-4 text-center text-slate-500 font-medium">
+                      {index + 1}
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex flex-wrap gap-1">
@@ -642,13 +899,18 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
                     <td className="px-6 py-4 text-right text-slate-600">
                       {formatCurrency(avgPrice)}
                     </td>
+                    <td className="px-6 py-4 text-center">
+                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${statusColor}`}>
+                        {statusText}
+                      </span>
+                    </td>
                   </tr>
                 );
               })}
               {sortedAndFilteredItems.length === 0 && (
                 <tr>
                   <td
-                    colSpan={10}
+                    colSpan={11}
                     className="px-6 py-12 text-center text-slate-500"
                   >
                     Không tìm thấy dữ liệu phù hợp
@@ -659,6 +921,23 @@ export function AdminDatabase({ orders, onUpdateOrder }: AdminDatabaseProps) {
           </table>
         </div>
       </div>
+
+      {confirmModal && (
+        <ConfirmModal
+          isOpen={confirmModal.isOpen}
+          onCancel={() => setConfirmModal(null)}
+          onConfirm={confirmModal.onConfirm}
+          title={confirmModal.title}
+          message={confirmModal.message}
+          confirmText={confirmModal.confirmText}
+        />
+      )}
+
+      {toastMessage && (
+        <div className="fixed bottom-4 right-4 bg-slate-800 text-white px-6 py-3 rounded-lg shadow-lg z-50 animate-fade-in">
+          {toastMessage}
+        </div>
+      )}
     </div>
   );
 }

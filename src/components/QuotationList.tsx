@@ -193,6 +193,7 @@ export function QuotationList({
           <table className="w-full text-left border-collapse">
             <thead className="sticky top-0 bg-slate-50 z-10">
               <tr className="border-b border-slate-200 text-slate-500 text-xs uppercase tracking-wider font-semibold">
+                <th className="px-6 py-4 whitespace-nowrap w-16">STT</th>
                 <th className="px-6 py-4 whitespace-nowrap">Tên báo giá</th>
                 {isAdmin && (
                   <th className="px-6 py-4 whitespace-nowrap">
@@ -209,12 +210,15 @@ export function QuotationList({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {paginatedQuotations.map((quotation) => (
+              {paginatedQuotations.map((quotation, index) => (
                 <tr
                   key={quotation.id}
                   onClick={() => onSelectQuotation(quotation)}
                   className="hover:bg-slate-50/50 transition-colors cursor-pointer group"
                 >
+                  <td className="px-6 py-4 text-sm text-slate-500 font-medium">
+                    {startIndex + index + 1}
+                  </td>
                   <td className="px-6 py-4">
                     <div className="font-medium text-slate-900">
                       {quotation.name}

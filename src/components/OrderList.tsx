@@ -41,6 +41,8 @@ export function OrderList({
   }));
 
   const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<OrderStatus | "ALL">("ALL");
+  const [dateFilter, setDateFilter] = useState(""); // YYYY-MM
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(50);
   const [activeTab, setActiveTab] = useState<OrderType>(OrderType.SALES);
@@ -67,13 +69,17 @@ export function OrderList({
 
   const filteredOrders = orders.filter((order) => {
     const term = searchQuery.toLowerCase();
-    return (
-      (order.type === activeTab || (!order.type && activeTab === OrderType.SALES)) &&
-      (String(order.name).toLowerCase().includes(term) ||
+    const matchesType = (order.type === activeTab || (!order.type && activeTab === OrderType.SALES));
+    const matchesStatus = statusFilter === "ALL" || order.status === statusFilter;
+    const matchesDate = !dateFilter || order.date.startsWith(dateFilter);
+    const matchesSearch = (String(order.name).toLowerCase().includes(term) ||
+      (order.orderCode && String(order.orderCode).toLowerCase().includes(term)) ||
+      (order.customerCode && String(order.customerCode).toLowerCase().includes(term)) ||
       (order.supplier && String(order.supplier).toLowerCase().includes(term)) ||
       (order.customerName &&
-        String(order.customerName).toLowerCase().includes(term)))
-    );
+        String(order.customerName).toLowerCase().includes(term)));
+
+    return matchesType && matchesStatus && matchesDate && matchesSearch;
   });
 
   const totalPages = Math.ceil(filteredOrders.length / itemsPerPage);
@@ -142,8 +148,8 @@ export function OrderList({
         </div>
       )}
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="p-4 border-b border-slate-100 flex items-center gap-4 bg-slate-50/50">
-          <div className="relative flex-1 max-w-md">
+        <div className="p-4 border-b border-slate-100 flex flex-wrap items-center gap-4 bg-slate-50/50">
+          <div className="relative flex-1 min-w-[300px] max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
             <input
               type="text"
@@ -151,6 +157,31 @@ export function OrderList({
               value={searchQuery}
               onChange={handleSearchChange}
               className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value as any);
+                setCurrentPage(1);
+              }}
+              className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+            >
+              <option value="ALL">Tất cả trạng thái</option>
+              <option value={OrderStatus.PROCESSING}>Đang xử lý</option>
+              <option value={OrderStatus.PARTIAL}>Một phần</option>
+              <option value={OrderStatus.COMPLETED}>Hoàn tất</option>
+              <option value={OrderStatus.CANCELLED}>Đã hủy</option>
+            </select>
+            <input
+              type="month"
+              value={dateFilter}
+              onChange={(e) => {
+                setDateFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
             />
           </div>
         </div>
@@ -184,6 +215,7 @@ export function OrderList({
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-xs uppercase tracking-wider font-semibold">
+                  <th className="px-6 py-4 whitespace-nowrap w-16">STT</th>
                   <th className="px-6 py-4 whitespace-nowrap">Tên đơn hàng</th>
                   <th className="px-6 py-4 whitespace-nowrap">{activeTab === OrderType.SALES ? "Khách hàng" : "Nhà cung cấp"}</th>
                   <th className="px-6 py-4 whitespace-nowrap">Trạng thái</th>
@@ -200,7 +232,7 @@ export function OrderList({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {paginatedOrders.map((order) => {
+                {paginatedOrders.map((order, index) => {
                   const totalOrdered = order.items.reduce(
                     (sum, item) => sum + item.orderedQty,
                     0,
@@ -228,30 +260,50 @@ export function OrderList({
                   });
                   const isCompleted = progress >= 100;
                   const hasMissingItems = progress > 0 && progress < 100;
-                  const hasWarning = hasPriceIncrease || hasMissingItems;
+                  const isProcessing = order.status === OrderStatus.PROCESSING;
+                  const isPartial = order.status === OrderStatus.PARTIAL;
 
                   return (
                     <tr
                       key={order.id}
                       onClick={() => onViewOrder(order.id)}
                       className={`transition-colors cursor-pointer group ${
-                        hasWarning
+                        isProcessing
+                          ? "bg-amber-50/40 hover:bg-amber-50/60"
+                          : isPartial
+                          ? "bg-sky-50/40 hover:bg-sky-50/60"
+                          : hasPriceIncrease
                           ? "bg-rose-50/20 hover:bg-rose-50/50"
                           : "hover:bg-slate-50/80"
                       }`}
                     >
+                      <td className="px-6 py-4 text-sm text-slate-500 font-medium">
+                        {startIndex + index + 1}
+                      </td>
                       <td className="px-6 py-4">
                         <div className="font-medium text-slate-900">
                           {order.name}
                         </div>
+                        {order.orderCode && (
+                          <div className="text-xs text-slate-500 mt-0.5 font-mono">
+                            Mã ĐH: {order.orderCode}
+                          </div>
+                        )}
                         <div className="text-sm text-slate-500 mt-0.5">
                           {order.supplier}
                         </div>
                       </td>
                       <td className="px-6 py-4">
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
-                          {activeTab === OrderType.SALES ? (order.customerName || "Khách lẻ") : (order.supplier || "Chưa xác định")}
-                        </span>
+                        <div className="flex flex-col gap-1">
+                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800 w-fit">
+                            {activeTab === OrderType.SALES ? (order.customerName || "Khách lẻ") : (order.supplier || "Chưa xác định")}
+                          </span>
+                          {order.customerCode && (
+                            <span className="text-xs text-slate-500 font-mono">
+                              Mã KH: {order.customerCode}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-6 py-4">
                         {order.status === OrderStatus.COMPLETED ? (
@@ -259,12 +311,12 @@ export function OrderList({
                             <CheckCircle2 size={10} /> HOÀN TẤT
                           </span>
                         ) : order.status === OrderStatus.PARTIAL ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700 border border-blue-200">
-                            <Clock size={10} /> ĐANG VỀ (MỘT PHẦN)
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200 shadow-sm">
+                            <Clock size={10} className="animate-pulse" /> ĐANG VỀ (MỘT PHẦN)
                           </span>
                         ) : order.status === OrderStatus.PROCESSING ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-700 border border-indigo-200">
-                            <Clock size={10} /> ĐANG XỬ LÝ
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 border border-amber-200 shadow-sm">
+                            <Clock size={10} className="animate-pulse" /> ĐANG XỬ LÝ
                           </span>
                         ) : order.status === OrderStatus.CANCELLED ? (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-200 text-slate-700 border border-slate-300">

@@ -115,17 +115,6 @@ export function Sidebar({
               <Users className="w-5 h-5" />
               <span className="font-medium">Quản lý tài khoản SSO</span>
             </button>
-            <button
-              onClick={() => setCurrentView("admin")}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-colors ${
-                currentView === "admin"
-                  ? "bg-rose-500/10 text-rose-400"
-                  : "hover:bg-slate-800 hover:text-rose-400/70"
-              }`}
-            >
-              <Database className="w-5 h-5" />
-              <span className="font-medium">Admin Database</span>
-            </button>
           </div>
         )}
       </nav>

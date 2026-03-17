@@ -7,6 +7,7 @@ interface ConfirmModalProps {
   message: string;
   onConfirm: () => void;
   onCancel: () => void;
+  confirmText?: string;
 }
 
 export function ConfirmModal({
@@ -15,6 +16,7 @@ export function ConfirmModal({
   message,
   onConfirm,
   onCancel,
+  confirmText = "Xóa",
 }: ConfirmModalProps) {
   if (!isOpen) return null;
 
@@ -43,7 +45,7 @@ export function ConfirmModal({
             onClick={onConfirm}
             className="px-4 py-2 text-sm font-medium text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors"
           >
-            Xóa
+            {confirmText}
           </button>
         </div>
       </div>

@@ -245,6 +245,17 @@ export function QuotationDetail({
     const newItems = [...editingQuotation.items];
     const item = { ...newItems[index], [field]: value };
     
+    if (field === "name") {
+      const searchKey = String(value).toLowerCase().trim();
+      const matchedProduct = products.find(p => p.sku.toLowerCase().trim() === searchKey || p.name.toLowerCase().trim() === searchKey);
+      if (matchedProduct) {
+        item.productName = matchedProduct.name;
+        if (item.quotedPrice === 0 && matchedProduct.basePrice) {
+          item.quotedPrice = matchedProduct.basePrice;
+        }
+      }
+    }
+
     // Auto-calculate VND price if foreign price or exchange rate changes
     if (field === "foreignQuotedPrice") {
       const rate = Number(editingQuotation.exchangeRate) || 1;
@@ -395,10 +406,19 @@ export function QuotationDetail({
           const foreignPrice = currency !== "VND" ? record.price : undefined;
           const vndPrice = currency !== "VND" ? Math.ceil(record.price * rate) : record.price;
 
+          const searchKey1 = String(record.name || "").toLowerCase().trim();
+          const searchKey2 = String(record.productName || "").toLowerCase().trim();
+          
+          let matchedProduct = products.find(p => 
+            p.sku.toLowerCase().trim() === searchKey1 || 
+            p.name.toLowerCase().trim() === searchKey1 ||
+            (searchKey2 && (p.sku.toLowerCase().trim() === searchKey2 || p.name.toLowerCase().trim() === searchKey2))
+          );
+
           return {
             id: crypto.randomUUID(),
             name: record.name,
-            productName: record.productName || "",
+            productName: matchedProduct ? matchedProduct.name : (record.productName || ""),
             quantity: record.qty || 1,
             quotedPrice: vndPrice,
             foreignQuotedPrice: foreignPrice,

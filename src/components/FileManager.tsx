@@ -21,9 +21,11 @@ import { parseExcelData, parseNumber, parseDate } from "../utils";
 import { ConfirmModal } from "./ConfirmModal";
 import { useAuth } from "../store";
 import { mapExcelHeaders } from "../services/gemini";
+import { Product } from "../types";
 
 interface FileManagerProps {
   orders: Order[];
+  products?: Product[];
   onUpdateOrder: (order: Order) => Promise<void> | void;
   onDeleteOrder: (id: string) => Promise<void> | void;
   onCreateOrder: () => void;
@@ -31,12 +33,15 @@ interface FileManagerProps {
 
 export function FileManager({
   orders,
+  products = [],
   onUpdateOrder,
   onDeleteOrder,
   onCreateOrder,
 }: FileManagerProps) {
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
+  const [statusFilter, setStatusFilter] = useState<OrderStatus | "ALL">("ALL");
+  const [dateFilter, setDateFilter] = useState(""); // YYYY-MM
   const [currentPage, setCurrentPage] = useState(1);
   const [activeTab, setActiveTab] = useState<OrderType>(OrderType.SALES);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -76,10 +81,13 @@ export function FileManager({
     selectedOrder?.status === OrderStatus.CANCELLED ||
     selectedOrder?.status === OrderStatus.PARTIAL;
 
-  const filteredOrders = orders.filter((order) =>
-    (order.type === activeTab || (!order.type && activeTab === OrderType.SALES)) &&
-    order.name.toLowerCase().includes(searchTerm.toLowerCase()),
-  );
+  const filteredOrders = orders.filter((order) => {
+    const matchesType = (order.type === activeTab || (!order.type && activeTab === OrderType.SALES));
+    const matchesStatus = statusFilter === "ALL" || order.status === statusFilter;
+    const matchesSearch = order.name.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesDate = !dateFilter || order.date.startsWith(dateFilter);
+    return matchesType && matchesStatus && matchesSearch && matchesDate;
+  });
 
   const totalPages = Math.ceil(filteredOrders.length / ITEMS_PER_PAGE);
   const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
@@ -110,7 +118,7 @@ export function FileManager({
     }
 
     try {
-      await onUpdateOrder(recalculateOrder(updatedOrder));
+      await onUpdateOrder(recalculateOrder(updatedOrder, products));
       setFileToDelete(null);
     } catch (err) {
       alert("Có lỗi khi xóa file. Vui lòng thử lại.");
@@ -232,10 +240,19 @@ export function FileManager({
               price: record.price,
             };
           } else {
+            const searchKey1 = String(record.name || "").toLowerCase().trim();
+            const searchKey2 = String(record.productName || "").toLowerCase().trim();
+            
+            let matchedProduct = products.find(p => 
+              p.sku.toLowerCase().trim() === searchKey1 || 
+              p.name.toLowerCase().trim() === searchKey1 ||
+              (searchKey2 && (p.sku.toLowerCase().trim() === searchKey2 || p.name.toLowerCase().trim() === searchKey2))
+            );
+
             return {
               itemId: crypto.randomUUID(),
               name: record.name,
-              productName: record.productName,
+              productName: matchedProduct ? matchedProduct.name : record.productName,
               qty: record.qty,
               price: record.price,
             };
@@ -299,7 +316,7 @@ export function FileManager({
           updatedOrder.receipts = updatedReceipts;
         }
 
-        await onUpdateOrder(recalculateOrder(updatedOrder));
+        await onUpdateOrder(recalculateOrder(updatedOrder, products));
         setUpdatingFileId(null);
         setUploadType(null);
 
@@ -397,15 +414,83 @@ export function FileManager({
               <Plus className="w-4 h-4" />
             </button>
           </div>
-          <div className="relative">
-            <input
-              type="text"
-              placeholder="Tìm kiếm đơn hàng..."
-              value={searchTerm}
-              onChange={handleSearchChange}
-              className="w-full pl-9 pr-4 py-2 text-sm bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-            />
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+
+          {isAdmin && (
+            <div className="flex gap-4 border-b border-slate-200">
+              <button
+                onClick={() => {
+                  setActiveTab(OrderType.SALES);
+                  setCurrentPage(1);
+                }}
+                className={`pb-2 px-1 font-medium text-xs flex items-center gap-1.5 transition-colors relative ${
+                  activeTab === OrderType.SALES
+                    ? "text-emerald-600"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" />
+                Bán hàng
+                {activeTab === OrderType.SALES && (
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-600 rounded-t-full" />
+                )}
+              </button>
+              <button
+                onClick={() => {
+                  setActiveTab(OrderType.PURCHASE);
+                  setCurrentPage(1);
+                }}
+                className={`pb-2 px-1 font-medium text-xs flex items-center gap-1.5 transition-colors relative ${
+                  activeTab === OrderType.PURCHASE
+                    ? "text-emerald-600"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                <Building2 className="w-3.5 h-3.5" />
+                Mua hàng
+                {activeTab === OrderType.PURCHASE && (
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-emerald-600 rounded-t-full" />
+                )}
+              </button>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <div className="relative">
+              <input
+                type="text"
+                placeholder="Tìm kiếm đơn hàng..."
+                value={searchTerm}
+                onChange={handleSearchChange}
+                className="w-full pl-9 pr-4 py-2 text-sm bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+              />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            </div>
+
+            <div className="flex gap-2">
+              <select
+                value={statusFilter}
+                onChange={(e) => {
+                  setStatusFilter(e.target.value as any);
+                  setCurrentPage(1);
+                }}
+                className="flex-1 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+              >
+                <option value="ALL">Tất cả trạng thái</option>
+                <option value={OrderStatus.PROCESSING}>Đang xử lý</option>
+                <option value={OrderStatus.PARTIAL}>Một phần</option>
+                <option value={OrderStatus.COMPLETED}>Hoàn tất</option>
+                <option value={OrderStatus.CANCELLED}>Đã hủy</option>
+              </select>
+              <input
+                type="month"
+                value={dateFilter}
+                onChange={(e) => {
+                  setDateFilter(e.target.value);
+                  setCurrentPage(1);
+                }}
+                className="flex-1 text-xs border border-slate-200 rounded-lg px-2 py-1.5 bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500"
+              />
+            </div>
           </div>
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
